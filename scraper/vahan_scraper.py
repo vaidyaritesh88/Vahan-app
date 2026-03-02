@@ -42,11 +42,42 @@ class VahanScraper:
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--window-size=1920,1080")
         options.add_argument("--disable-gpu")
+        options.add_argument("--disable-software-rasterizer")
+        options.add_argument("--single-process")
+        options.add_argument("--remote-debugging-port=9222")
         options.add_argument(
             "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
 
+        import shutil, os, platform
+
+        # Detect Chromium binary on Linux cloud (Streamlit Cloud)
+        if platform.system() == "Linux":
+            for chromium_path in [
+                shutil.which("chromium"),
+                shutil.which("chromium-browser"),
+                "/usr/bin/chromium",
+                "/usr/bin/chromium-browser",
+            ]:
+                if chromium_path and os.path.isfile(chromium_path):
+                    options.binary_location = chromium_path
+                    break
+
+            for driver_path in [
+                shutil.which("chromedriver"),
+                "/usr/bin/chromedriver",
+                "/usr/lib/chromium/chromedriver",
+            ]:
+                if driver_path and os.path.isfile(driver_path):
+                    from selenium.webdriver.chrome.service import Service
+                    service = Service(executable_path=driver_path)
+                    self.driver = webdriver.Chrome(service=service, options=options)
+                    self.wait = WebDriverWait(self.driver, 30)
+                    self.short_wait = WebDriverWait(self.driver, 10)
+                    return
+
+        # Fallback: webdriver-manager (local dev / Windows)
         try:
             from webdriver_manager.chrome import ChromeDriverManager
             from selenium.webdriver.chrome.service import Service
