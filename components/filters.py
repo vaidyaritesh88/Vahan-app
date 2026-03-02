@@ -6,6 +6,7 @@ from database.queries import (
     get_states_with_data, has_state_data,
 )
 from components.formatters import format_month, MONTH_NAMES
+from components.analysis import PERIOD_PRESETS
 
 
 def month_selector(key="period", label="Select Month"):
@@ -81,3 +82,36 @@ def base_category_selector(key="base_cat"):
     options = dict(zip(base_with_subs["name"], base_with_subs["code"]))
     selected = st.sidebar.selectbox("Base Category", list(options.keys()), key=key)
     return options[selected]
+
+
+def period_selector(key="period_preset", label="Analysis Period"):
+    """Period preset selector. Returns (preset_name, year, month) for the reference month."""
+    months = get_available_months()
+    if not months:
+        st.sidebar.warning("No data loaded yet.")
+        return None, None, None
+
+    preset = st.sidebar.selectbox(label, list(PERIOD_PRESETS.keys()), key=f"{key}_preset")
+
+    # Reference month selector
+    options = [f"{format_month(y, m)}" for y, m in months]
+    selected = st.sidebar.selectbox("Reference Month", options, key=f"{key}_ref")
+    idx = options.index(selected)
+    year, month = months[idx]
+
+    return preset, year, month
+
+
+def frequency_selector(key="freq", label="View Frequency"):
+    """Selector for monthly/quarterly/annual aggregation."""
+    return st.selectbox(label, ["Monthly", "Quarterly", "Annual"], key=key)
+
+
+def main_category_selector(key="main_cat", label="Select Category"):
+    """Select from main categories (PV, 2W, 3W, CV, TRACTORS) - inline, not sidebar."""
+    cats = get_main_categories()
+    if cats.empty:
+        return None, None
+    options = dict(zip(cats["name"], cats["code"]))
+    selected = st.sidebar.selectbox(label, list(options.keys()), key=key)
+    return options[selected], selected

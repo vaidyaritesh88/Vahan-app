@@ -441,6 +441,169 @@ def get_states_with_data(category_code=None):
 
 
 # ──────────────────────────────────────────────
+# OEM 360 ENHANCED / INDUSTRY ANALYSIS
+# ──────────────────────────────────────────────
+
+def get_oem_monthly_all(oem_name):
+    """Get all monthly volume data for an OEM across all categories."""
+    df = _query_df("""
+        SELECT n.category_code, c.name as category_name,
+               c.is_subsegment, c.base_category_code,
+               n.year, n.month, n.volume
+        FROM national_monthly n
+        JOIN categories c ON n.category_code = c.code
+        WHERE n.oem_name = ? AND n.volume > 0
+        ORDER BY n.year, n.month
+    """, [oem_name])
+    if not df.empty:
+        df["date"] = pd.to_datetime(df[["year", "month"]].assign(day=1))
+    return df
+
+
+def get_category_monthly_all(category_code):
+    """Get all monthly total volumes for a category (all OEMs summed)."""
+    df = _query_df("""
+        SELECT year, month, SUM(volume) as volume
+        FROM national_monthly
+        WHERE category_code = ? AND volume > 0
+        GROUP BY year, month
+        ORDER BY year, month
+    """, [category_code])
+    if not df.empty:
+        df["date"] = pd.to_datetime(df[["year", "month"]].assign(day=1))
+    return df
+
+
+def get_oem_with_market_totals(oem_name, category_code):
+    """Get OEM monthly volumes alongside category totals for share computation."""
+    df = _query_df("""
+        SELECT n.year, n.month, n.volume as oem_volume, t.total_volume
+        FROM national_monthly n
+        JOIN (
+            SELECT year, month, SUM(volume) as total_volume
+            FROM national_monthly
+            WHERE category_code = ?
+            GROUP BY year, month
+        ) t ON n.year = t.year AND n.month = t.month
+        WHERE n.oem_name = ? AND n.category_code = ? AND n.volume > 0
+        ORDER BY n.year, n.month
+    """, [category_code, oem_name, category_code])
+    if not df.empty:
+        df["date"] = pd.to_datetime(df[["year", "month"]].assign(day=1))
+        df["share_pct"] = (df["oem_volume"] / df["total_volume"] * 100).round(2)
+    return df
+
+
+def get_oem_categories_list(oem_name):
+    """Get the list of base categories an OEM participates in (non-subsegment)."""
+    return _query_df("""
+        SELECT DISTINCT n.category_code, c.name as category_name
+        FROM national_monthly n
+        JOIN categories c ON n.category_code = c.code
+        WHERE n.oem_name = ? AND n.volume > 0
+              AND c.is_subsegment = 0 AND c.parent_code IS NULL
+        ORDER BY c.display_order
+    """, [oem_name])
+
+
+def get_subsegments_for_base(base_category_code):
+    """Get subsegment category codes for a base category."""
+    return _query_df("""
+        SELECT code, name FROM categories
+        WHERE base_category_code = ? AND is_subsegment = 1
+        ORDER BY display_order
+    """, [base_category_code])
+
+
+def get_category_oem_volumes_all(category_code):
+    """Get all monthly OEM volumes for a category (for market share over time)."""
+    return _query_df("""
+        SELECT oem_name, year, month, volume
+        FROM national_monthly
+        WHERE category_code = ? AND volume > 0 AND oem_name != 'Others'
+        ORDER BY year, month
+    """, [category_code])
+
+
+def get_state_oem_monthly(oem_name, category_code):
+    """Get OEM's monthly state-level volumes."""
+    df = _query_df("""
+        SELECT state, year, month, volume
+        FROM state_monthly
+        WHERE oem_name = ? AND category_code = ? AND volume > 0
+        ORDER BY year, month
+    """, [oem_name, category_code])
+    if not df.empty:
+        df["date"] = pd.to_datetime(df[["year", "month"]].assign(day=1))
+    return df
+
+
+def get_state_category_monthly(category_code):
+    """Get category monthly totals by state (for state-level share)."""
+    df = _query_df("""
+        SELECT state, year, month, SUM(volume) as total_volume
+        FROM state_monthly
+        WHERE category_code = ? AND volume > 0
+        GROUP BY state, year, month
+        ORDER BY year, month
+    """, [category_code])
+    if not df.empty:
+        df["date"] = pd.to_datetime(df[["year", "month"]].assign(day=1))
+    return df
+
+
+def get_ev_penetration_all(base_category_code):
+    """Get EV penetration data for a base category over all available months."""
+    subs = get_subsegments_for_base(base_category_code)
+    ev_codes = [c for c in subs["code"].tolist() if c.startswith("EV_")]
+    if not ev_codes:
+        return pd.DataFrame()
+
+    placeholders = ",".join(["?"] * len(ev_codes))
+    ev_df = _query_df(f"""
+        SELECT year, month, SUM(volume) as ev_volume
+        FROM national_monthly
+        WHERE category_code IN ({placeholders}) AND volume > 0
+        GROUP BY year, month
+        ORDER BY year, month
+    """, ev_codes)
+
+    base_df = _query_df("""
+        SELECT year, month, SUM(volume) as base_volume
+        FROM national_monthly
+        WHERE category_code = ? AND volume > 0
+        GROUP BY year, month
+        ORDER BY year, month
+    """, [base_category_code])
+
+    if ev_df.empty or base_df.empty:
+        return pd.DataFrame()
+
+    df = ev_df.merge(base_df, on=["year", "month"], how="inner")
+    df["penetration_pct"] = (df["ev_volume"] / df["base_volume"] * 100).round(2)
+    df["date"] = pd.to_datetime(df[["year", "month"]].assign(day=1))
+    return df
+
+
+def get_top_oems_for_period(category_code, start_year, start_month, end_year, end_month, top_n=10):
+    """Get top OEMs by total volume for a period range."""
+    df = _query_df("""
+        SELECT oem_name, SUM(volume) as volume
+        FROM national_monthly
+        WHERE category_code = ? AND volume > 0 AND oem_name != 'Others'
+              AND (year * 100 + month) >= ? AND (year * 100 + month) <= ?
+        GROUP BY oem_name
+        ORDER BY volume DESC
+        LIMIT ?
+    """, [category_code, start_year * 100 + start_month,
+          end_year * 100 + end_month, top_n])
+    if not df.empty:
+        total = df["volume"].sum()
+        df["share_pct"] = (df["volume"] / total * 100).round(1)
+    return df
+
+
+# ──────────────────────────────────────────────
 # DATA MANAGEMENT
 # ──────────────────────────────────────────────
 
