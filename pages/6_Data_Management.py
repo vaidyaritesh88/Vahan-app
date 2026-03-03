@@ -102,7 +102,7 @@ with tab2:
     st.markdown("### Configure Scrape Job")
 
     # Key categories for investment analysis
-    key_categories = ["2W", "PV", "3W", "CV", "EV_2W", "EV_PV", "EV_3W", "TRACTORS"]
+    key_categories = ["2W", "PV", "3W", "LCV", "MHCV", "EV_2W", "EV_PV", "EV_3W", "TRACTORS"]
     # Key states (top 15 by vehicle registrations)
     key_states = [
         "Maharashtra", "Tamil Nadu", "Karnataka", "Gujarat", "Uttar Pradesh",
