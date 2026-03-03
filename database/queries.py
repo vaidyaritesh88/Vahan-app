@@ -635,3 +635,29 @@ def get_record_counts():
         counts[table] = cursor.fetchone()[0]
     conn.close()
     return counts
+
+
+def get_scrape_log_summary():
+    """Get scrape log grouped by category/state/year with status."""
+    return _query_df("""
+        SELECT category_code, state, year, status,
+               MAX(completed_at) as last_run,
+               SUM(rows_inserted) as total_rows
+        FROM scrape_log
+        GROUP BY category_code, state, year, status
+        ORDER BY last_run DESC
+    """)
+
+
+def get_state_data_freshness():
+    """Get state-level data freshness: latest month per category/state."""
+    return _query_df("""
+        SELECT category_code, state,
+               MAX(year * 100 + month) as latest_ym,
+               COUNT(DISTINCT oem_name) as oem_count,
+               SUM(volume) as total_volume
+        FROM state_monthly
+        WHERE volume > 0
+        GROUP BY category_code, state
+        ORDER BY category_code, state
+    """)
