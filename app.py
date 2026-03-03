@@ -40,6 +40,7 @@ Use the sidebar to navigate between analysis pages:
 | **State Performance** | Regional analysis & state-level OEM market share |
 | **Data Management** | Upload Excel, run Vahan scraper, monitor data freshness |
 | **OEM Comparison** | Side-by-side OEM comparison: growth, share (Monthly/Quarterly/FY/FYTD) |
+| **AI Chat** | Ask natural language questions, get charts & calculations on demand |
 """)
 
 # Quick data status
