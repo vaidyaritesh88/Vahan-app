@@ -25,6 +25,18 @@ init_db()
 st.set_page_config(page_title="OEM 360", page_icon="🏢", layout="wide")
 st.title("OEM 360 View")
 
+
+# ── Helper ──
+
+def _safe_growth(current, previous):
+    """Compute YoY/growth % safely."""
+    if current is None or previous is None:
+        return None
+    if pd.isna(current) or pd.isna(previous) or previous <= 0:
+        return None
+    return round(((current / previous) - 1) * 100, 1)
+
+
 # ── Sidebar Filters ──
 oem = oem_selector(key="oem360")
 preset, ref_year, ref_month = period_selector(key="oem360_period")
@@ -68,34 +80,173 @@ col1, col2, col3, col4, col5, col6 = st.columns(6)
 with col1:
     st.metric("Total Volume", format_units(total_vol))
 with col2:
-    st.metric("MoM Growth", format_pct(growth["mom_pct"]))
+    st.metric("MoM Growth", format_pct(growth["mom_pct"]),
+              help="Month-on-Month: reference month volume vs previous month volume")
 with col3:
-    st.metric("QoQ Growth", format_pct(growth["qoq_pct"]))
+    st.metric(
+        "QoQ Growth", format_pct(growth["qoq_pct"]),
+        help="Compares the reference month's volume to the volume 3 months prior "
+             "(e.g., Feb'26 vs Nov'25). This is a single-month comparison, "
+             "not a sum of 3 months vs 3 months.",
+    )
 with col4:
-    st.metric("YoY Growth", format_pct(growth["yoy_pct"]))
+    st.metric("YoY Growth", format_pct(growth["yoy_pct"]),
+              help="Year-on-Year: reference month volume vs same month previous year")
 with col5:
-    st.metric("FYTD Volume", format_units(fytd["fytd_vol"]) if fytd["fytd_vol"] else "N/A")
+    st.metric("FYTD Volume", format_units(fytd["fytd_vol"]) if fytd["fytd_vol"] else "N/A",
+              help="Fiscal Year To Date: cumulative volume from April of current FY through reference month")
 with col6:
-    st.metric("FYTD YoY", format_pct(fytd["fytd_yoy_pct"]))
+    st.metric("FYTD YoY", format_pct(fytd["fytd_yoy_pct"]),
+              help="FYTD vs same period in previous fiscal year")
 
 st.divider()
 
 # ────────────────────────────────────────
-# SECTION 2: FY-over-FY GROWTH TABLE
+# SECTION 2: MONTHLY SALES TABLE (Last 12 months)
+# ────────────────────────────────────────
+st.subheader("Monthly Sales")
+st.caption("Last 12 months — absolute volumes, YoY growth, and rolling 12-month sales")
+
+all_monthly = agg_monthly.sort_values("date").copy()
+all_monthly["ym"] = all_monthly["year"].astype(int) * 100 + all_monthly["month"].astype(int)
+vol_map = dict(zip(all_monthly["ym"], all_monthly["volume"]))
+
+# YoY for each month
+all_monthly["yoy_pct"] = all_monthly.apply(
+    lambda r: _safe_growth(r["volume"], vol_map.get((int(r["year"]) - 1) * 100 + int(r["month"]))),
+    axis=1,
+)
+
+# Rolling 12M
+all_monthly["rolling_12m"] = all_monthly["volume"].rolling(12, min_periods=12).sum()
+
+# Rolling 12M YoY
+r12m_map = dict(zip(all_monthly["ym"], all_monthly["rolling_12m"]))
+all_monthly["r12m_yoy_pct"] = all_monthly.apply(
+    lambda r: _safe_growth(r["rolling_12m"], r12m_map.get((int(r["year"]) - 1) * 100 + int(r["month"]))),
+    axis=1,
+)
+
+# Display last 12 months (latest first)
+last_12 = all_monthly.tail(12).iloc[::-1]
+display_monthly = pd.DataFrame({
+    "Month": last_12.apply(lambda r: format_month(int(r["year"]), int(r["month"])), axis=1).values,
+    "Volume": last_12["volume"].apply(format_units).values,
+    "YoY %": last_12["yoy_pct"].apply(lambda x: format_pct(x) if pd.notna(x) else "—").values,
+    "Rolling 12M": last_12["rolling_12m"].apply(lambda x: format_units(x) if pd.notna(x) else "—").values,
+    "R12M YoY %": last_12["r12m_yoy_pct"].apply(lambda x: format_pct(x) if pd.notna(x) else "—").values,
+})
+st.dataframe(display_monthly, use_container_width=True, hide_index=True)
+
+st.divider()
+
+# ────────────────────────────────────────
+# SECTION 3: QUARTERLY SALES TABLE
+# ────────────────────────────────────────
+st.subheader("Quarterly Sales")
+st.caption("Financial quarters (1Q = Apr-Jun, 2Q = Jul-Sep, 3Q = Oct-Dec, 4Q = Jan-Mar)")
+
+q_data = add_fy_columns(all_monthly.copy())
+quarterly = q_data.groupby(["fy", "quarter", "q_label"]).agg(
+    volume=("volume", "sum"),
+    month_count=("month", "count"),
+).reset_index()
+quarterly = quarterly.sort_values(["fy", "quarter"])
+
+# Build lookup for complete-quarter volumes
+q_vol_lookup = {}
+for _, r in quarterly.iterrows():
+    q_vol_lookup[(int(r["fy"]), int(r["quarter"]))] = r["volume"]
+
+# Track which months belong to each quarter (for partial-quarter fair comparison)
+q_month_sets = q_data.groupby(["fy", "quarter"])["month"].apply(lambda s: set(s.astype(int))).to_dict()
+
+# YoY for each quarter — partial quarters compare to same months from previous year
+q_yoy_list = []
+for _, r in quarterly.iterrows():
+    fy, q, vol, mc = int(r["fy"]), int(r["quarter"]), r["volume"], int(r["month_count"])
+    if mc < 3:
+        # Partial quarter: compare to same months from prev year's same quarter
+        current_months = q_month_sets.get((fy, q), set())
+        prev_q_data = q_data[
+            (q_data["fy"] == fy - 1) & (q_data["quarter"] == q) &
+            (q_data["month"].astype(int).isin(current_months))
+        ]
+        prev_vol = prev_q_data["volume"].sum() if not prev_q_data.empty else 0
+    else:
+        prev_vol = q_vol_lookup.get((fy - 1, q), 0)
+    q_yoy_list.append(_safe_growth(vol, prev_vol))
+quarterly["yoy_pct"] = q_yoy_list
+
+# Format quarter labels
+quarterly["display_label"] = quarterly.apply(
+    lambda r: f"{int(r['quarter'])}QFY{str(int(r['fy']) + 1)[-2:]}"
+              + (f" ({int(r['month_count'])}M)" if r["month_count"] < 3 else ""),
+    axis=1,
+)
+
+# Show last 8 quarters (latest first)
+display_q = quarterly.tail(8).iloc[::-1]
+display_quarterly = pd.DataFrame({
+    "Quarter": display_q["display_label"].values,
+    "Volume": display_q["volume"].apply(format_units).values,
+    "YoY %": display_q["yoy_pct"].apply(lambda x: format_pct(x) if pd.notna(x) else "—").values,
+})
+st.dataframe(display_quarterly, use_container_width=True, hide_index=True)
+
+st.divider()
+
+# ────────────────────────────────────────
+# SECTION 4: FISCAL YEAR PERFORMANCE
 # ────────────────────────────────────────
 st.subheader("Fiscal Year Performance")
-fy_df = compute_fy_volumes(agg_monthly)
-if not fy_df.empty:
-    display_fy = fy_df[["fy_label", "volume", "yoy_pct"]].copy()
-    display_fy.columns = ["Fiscal Year", "Volume", "YoY Growth %"]
-    display_fy["Volume"] = display_fy["Volume"].apply(format_units)
-    display_fy["YoY Growth %"] = display_fy["YoY Growth %"].apply(lambda x: format_pct(x) if pd.notna(x) else "—")
-    st.dataframe(display_fy, use_container_width=True, hide_index=True)
+
+fy_data = add_fy_columns(all_monthly.copy())
+fy_month_counts = fy_data.groupby("fy")["month"].count().to_dict()
+fy_vols = fy_data.groupby(["fy", "fy_label"])["volume"].sum().reset_index()
+fy_vols = fy_vols.sort_values("fy")
+
+if not fy_vols.empty:
+    latest_fy = int(fy_vols["fy"].max())
+    fy_vol_lookup = dict(zip(fy_vols["fy"].astype(int), fy_vols["volume"]))
+
+    fy_rows = []
+    for _, r in fy_vols.iterrows():
+        fy_num = int(r["fy"])
+        label = r["fy_label"]
+        vol = r["volume"]
+        n_months = fy_month_counts.get(fy_num, 0)
+
+        if fy_num == latest_fy and n_months < 12:
+            # Incomplete FY: use FYTD comparison (same months from previous FY)
+            label = f"{label} (FYTD {n_months}M)"
+            current_fy_rows = fy_data[fy_data["fy"] == fy_num]
+            prev_vol = 0
+            for _, mr in current_fy_rows.iterrows():
+                prev_match = all_monthly[
+                    (all_monthly["year"] == int(mr["year"]) - 1) &
+                    (all_monthly["month"] == int(mr["month"]))
+                ]
+                if not prev_match.empty:
+                    prev_vol += prev_match["volume"].iloc[0]
+            yoy = _safe_growth(vol, prev_vol)
+        else:
+            # Complete FY: compare to previous FY
+            prev_fy_vol = fy_vol_lookup.get(fy_num - 1)
+            yoy = _safe_growth(vol, prev_fy_vol)
+
+        fy_rows.append({
+            "Fiscal Year": label,
+            "Volume": format_units(vol),
+            "YoY Growth %": format_pct(yoy) if yoy is not None else "—",
+        })
+
+    st.dataframe(pd.DataFrame(fy_rows), use_container_width=True, hide_index=True)
 
 st.divider()
 
 # ────────────────────────────────────────
-# SECTION 3: CATEGORY BREAKDOWN
+# SECTION 5: CATEGORY BREAKDOWN
 # ────────────────────────────────────────
 st.subheader("Category Breakdown")
 col1, col2 = st.columns(2)
@@ -110,9 +261,22 @@ with col2:
                       title="Category Mix")
     st.plotly_chart(fig, use_container_width=True)
 
-# Per-category growth rates
+# Per-category growth rates (with Overall row at the top)
 st.markdown("**Category-wise Growth Rates**")
 cat_growth_rows = []
+
+# Overall row first
+cat_growth_rows.append({
+    "Category": "**Overall**",
+    "Volume": format_units(total_vol),
+    "MoM %": format_pct(growth["mom_pct"]),
+    "QoQ %": format_pct(growth["qoq_pct"]),
+    "YoY %": format_pct(growth["yoy_pct"]),
+    "FYTD Vol": format_units(fytd["fytd_vol"]) if fytd["fytd_vol"] else "N/A",
+    "FYTD YoY %": format_pct(fytd["fytd_yoy_pct"]),
+})
+
+# Per-category rows
 for _, row in cat_data.iterrows():
     cc = row["category_code"]
     cat_monthly = oem_data[oem_data["category_code"] == cc].copy()
@@ -136,7 +300,7 @@ if cat_growth_rows:
 st.divider()
 
 # ────────────────────────────────────────
-# SECTION 4: MARKET SHARE TRENDS
+# SECTION 6: MARKET SHARE TRENDS
 # ────────────────────────────────────────
 st.subheader("Market Share Analysis")
 
@@ -192,7 +356,6 @@ else:
                         ev_rows["type"] = f"EV {share_cat_name}"
 
                 # ICE share: computed from (overall vol - EV vol) / (total - total EV)
-                # Get category totals for base and EV
                 base_total = get_category_monthly_all(share_cat_code)
                 ev_total = get_category_monthly_all(ev_code)
                 oem_base = get_oem_with_market_totals(oem, share_cat_code)
@@ -200,9 +363,14 @@ else:
 
                 ice_rows = pd.DataFrame()
                 if not oem_base.empty and not base_total.empty:
+                    # Safely handle OEMs with no EV data (e.g., Royal Enfield)
+                    if not oem_ev_raw.empty and "date" in oem_ev_raw.columns and "oem_volume" in oem_ev_raw.columns:
+                        ev_oem_merge = oem_ev_raw[["date", "oem_volume"]].rename(columns={"oem_volume": "ev_oem_vol"})
+                    else:
+                        ev_oem_merge = pd.DataFrame(columns=["date", "ev_oem_vol"])
+
                     ice_calc = oem_base[["date", "oem_volume"]].merge(
-                        oem_ev_raw[["date", "oem_volume"]].rename(columns={"oem_volume": "ev_oem_vol"}),
-                        on="date", how="left"
+                        ev_oem_merge, on="date", how="left"
                     )
                     ice_calc["ev_oem_vol"] = ice_calc["ev_oem_vol"].fillna(0)
                     ice_calc["ice_oem_vol"] = ice_calc["oem_volume"] - ice_calc["ev_oem_vol"]
@@ -235,7 +403,7 @@ else:
 st.divider()
 
 # ────────────────────────────────────────
-# SECTION 5: VOLUME TREND WITH GROWTH RATES
+# SECTION 7: VOLUME TREND WITH GROWTH RATES
 # ────────────────────────────────────────
 st.subheader("Volume Trend")
 
@@ -264,7 +432,7 @@ if not vol_trend.empty:
 st.divider()
 
 # ────────────────────────────────────────
-# SECTION 6: STATE-LEVEL ANALYSIS
+# SECTION 8: STATE-LEVEL ANALYSIS
 # ────────────────────────────────────────
 if has_state_data():
     st.subheader("State-Level Analysis")
