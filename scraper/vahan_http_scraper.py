@@ -67,17 +67,21 @@ MONTH_MAP = {
 class VahanHttpScraper:
     """Scrapes Vahan portal using direct HTTP requests (no browser needed)."""
 
-    def __init__(self, timeout=30):
+    def __init__(self, timeout=30, verify_ssl=True):
         self.session = requests.Session()
         self.session.headers.update({
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
             ),
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.5",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
         })
         self.timeout = timeout
+        self.verify_ssl = verify_ssl
+        self.session.verify = verify_ssl
         self.viewstate = None
         self.form_url = VAHAN_URL
         self._page_loaded = False
@@ -91,7 +95,7 @@ class VahanHttpScraper:
         if self._page_loaded:
             return
 
-        r = self.session.get(self.form_url, timeout=self.timeout)
+        r = self.session.get(self.form_url, timeout=self.timeout, verify=self.verify_ssl)
         r.raise_for_status()
 
         self.viewstate = self._extract_viewstate(r.text)
@@ -494,19 +498,67 @@ class VahanHttpScraper:
         return rows
 
     def test_connection(self):
-        """Test if Vahan portal is reachable. Returns (success, message)."""
+        """Test if Vahan portal is reachable. Returns (success, message).
+
+        Automatically retries with SSL verification disabled if the first
+        attempt fails due to an SSL error (common in corporate networks).
+        """
         try:
             self._page_loaded = False
             self._load_page()
             return True, "Connected to Vahan portal successfully."
-        except requests.exceptions.ProxyError:
-            return False, "Proxy blocked the connection. Try running without a proxy or on a different network."
-        except requests.exceptions.ConnectionError:
-            return False, "Could not connect to Vahan portal. Check your internet connection."
+        except requests.exceptions.SSLError as e:
+            # SSL certificate error — often caused by corporate proxy / SSL inspection
+            logger.warning(f"SSL error on first attempt: {e}")
+            return self._retry_without_ssl(
+                f"SSL certificate error (likely corporate proxy). "
+                f"Detail: {str(e)[:150]}"
+            )
+        except requests.exceptions.ProxyError as e:
+            return False, f"Proxy blocked the connection. Detail: {str(e)[:150]}"
+        except requests.exceptions.ConnectionError as e:
+            # ConnectionError can wrap SSL errors too — check the underlying cause
+            inner = str(e)
+            if "SSL" in inner or "CERTIFICATE" in inner.upper() or "ssl" in inner:
+                logger.warning(f"SSL-related ConnectionError: {e}")
+                return self._retry_without_ssl(
+                    f"SSL/certificate error (likely corporate proxy). "
+                    f"Detail: {inner[:150]}"
+                )
+            return False, f"Could not connect to Vahan portal. Detail: {inner[:200]}"
         except requests.exceptions.Timeout:
             return False, "Connection timed out. The Vahan portal may be slow or unreachable."
+        except RuntimeError as e:
+            # ViewState extraction failure — portal responded but page structure changed
+            return False, f"Portal responded but page parsing failed: {str(e)}"
         except Exception as e:
-            return False, f"Connection failed: {str(e)}"
+            return False, f"Connection failed: {type(e).__name__}: {str(e)[:200]}"
+
+    def _retry_without_ssl(self, original_error_msg):
+        """Retry connection with SSL verification disabled.
+
+        Returns (success, message) tuple.
+        """
+        try:
+            logger.info("Retrying connection with SSL verification disabled...")
+            self.verify_ssl = False
+            self.session.verify = False
+
+            # Suppress InsecureRequestWarning for this session
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+            self._page_loaded = False
+            self._load_page()
+            return True, (
+                "Connected to Vahan portal successfully (SSL verification disabled). "
+                "Your network may use SSL inspection."
+            )
+        except Exception as retry_err:
+            return False, (
+                f"Initial error: {original_error_msg}\n"
+                f"Retry without SSL also failed: {str(retry_err)[:150]}"
+            )
 
 
 def _parse_month(label):

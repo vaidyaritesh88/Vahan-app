@@ -89,6 +89,9 @@ with tab2:
                     ok, msg = scraper.test_connection()
                     if ok:
                         st.success(msg)
+                        # Remember SSL setting for scraping session
+                        if not scraper.verify_ssl:
+                            st.session_state["vahan_verify_ssl"] = False
                     else:
                         st.error(msg)
                 except Exception as e:
@@ -190,7 +193,8 @@ with tab2:
             if not jobs:
                 st.success("All combinations already scraped! Uncheck 'Skip already scraped' to re-fetch.")
             else:
-                scraper = VahanHttpScraper()
+                verify_ssl = st.session_state.get("vahan_verify_ssl", True)
+                scraper = VahanHttpScraper(verify_ssl=verify_ssl)
 
                 for i, (cat, state, year) in enumerate(jobs):
                     status_text.text(f"Scraping {cat} / {state} / {year}  ({i+1}/{len(jobs)})")
