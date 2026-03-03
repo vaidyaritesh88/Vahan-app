@@ -34,11 +34,12 @@ Use the sidebar to navigate between analysis pages:
 | Page | Description |
 |------|-------------|
 | **Category Overview** | National volumes & YoY growth across all vehicle categories |
-| **Category Drilldown** | OEM breakdown, market share within a category |
-| **Subsegment Mix** | ICE / EV / CNG / Hybrid powertrain analysis |
-| **OEM 360** | Deep-dive into any OEM across categories and states |
+| **Category Drilldown** | OEM breakdown, market share, growth rates (MoM/QoQ/YoY) |
+| **Subsegment Mix** | ICE / EV / CNG / Hybrid analysis + state EV penetration |
+| **OEM 360** | Deep-dive into any OEM - fuel-type-aware share & state analysis |
 | **State Performance** | Regional analysis & state-level OEM market share |
 | **Data Management** | Upload Excel, run Vahan scraper, monitor data freshness |
+| **OEM Comparison** | Side-by-side OEM comparison: growth, share (Monthly/Quarterly/FY/FYTD) |
 """)
 
 # Quick data status

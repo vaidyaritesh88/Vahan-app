@@ -1,4 +1,4 @@
-"""Page 3: Subsegment Mix - ICE / EV / CNG / Hybrid analysis."""
+"""Page 3: Subsegment Mix - ICE / EV / CNG / Hybrid analysis + state EV penetration."""
 import streamlit as st
 import pandas as pd
 import sys, os
@@ -7,7 +7,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from database.schema import init_db
 from database.queries import (
     get_subsegment_mix, get_subsegment_trend,
-    get_subsegment_oem_breakdown,
+    get_subsegment_oem_breakdown, get_state_ev_penetration,
+    has_state_data,
 )
 from components.filters import month_selector, base_category_selector, top_n_selector
 from components.formatters import format_units, format_month
@@ -70,6 +71,62 @@ if not trend.empty:
     st.plotly_chart(fig, use_container_width=True)
 
 st.divider()
+
+# ── State-Level EV Penetration ──
+if has_state_data() and base_cat in ("2W", "PV", "3W"):
+    st.subheader(f"State-Level EV Penetration in {base_cat}")
+
+    ev_pen = get_state_ev_penetration(base_cat, year, month)
+    if not ev_pen.empty:
+        col1, col2 = st.columns(2)
+
+        with col1:
+            # Top states by EV penetration
+            top_ev = ev_pen.head(15).copy()
+            top_ev["label"] = top_ev.apply(
+                lambda r: f"{r['ev_penetration_pct']:.1f}% ({format_units(r['ev_volume'])} EV / {format_units(r['base_volume'])} total)",
+                axis=1,
+            )
+            import plotly.express as px
+            from components.formatters import OEM_COLORS
+            fig = px.bar(
+                top_ev, x="ev_penetration_pct", y="state", orientation="h",
+                title=f"Top States by EV Penetration in {base_cat}",
+                text="label", color_discrete_sequence=["#2ca02c"],
+            )
+            fig.update_layout(height=max(350, len(top_ev) * 35),
+                              margin=dict(l=40, r=20, t=40, b=40))
+            fig.update_yaxes(categoryorder="total ascending", title="")
+            fig.update_xaxes(title="EV Penetration %")
+            st.plotly_chart(fig, use_container_width=True)
+
+        with col2:
+            # Summary stats
+            national_ev = ev_pen["ev_volume"].sum()
+            national_base = ev_pen["base_volume"].sum()
+            national_pen = (national_ev / national_base * 100) if national_base > 0 else 0
+
+            st.metric("National EV Penetration", f"{national_pen:.1f}%")
+            st.metric("States with >5% EV Penetration",
+                      len(ev_pen[ev_pen["ev_penetration_pct"] > 5]))
+            st.metric("Total EV Volume", format_units(national_ev))
+
+            # Data table
+            st.markdown("**All States:**")
+            display_ev = ev_pen.copy()
+            display_ev["EV Penetration"] = display_ev["ev_penetration_pct"].apply(lambda v: f"{v:.1f}%")
+            display_ev["EV Volume"] = display_ev["ev_volume"].apply(format_units)
+            display_ev["Total Volume"] = display_ev["base_volume"].apply(format_units)
+            st.dataframe(
+                display_ev[["state", "EV Volume", "Total Volume", "EV Penetration"]].rename(
+                    columns={"state": "State"}
+                ),
+                use_container_width=True, hide_index=True, height=350,
+            )
+    else:
+        st.info("No state-level data for EV penetration analysis. Scrape Vahan to populate.")
+
+    st.divider()
 
 # ── OEM Breakdown per Subsegment ──
 st.subheader("Top OEMs by Subsegment")

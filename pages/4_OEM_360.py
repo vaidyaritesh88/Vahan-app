@@ -267,7 +267,7 @@ st.divider()
 # SECTION 6: STATE-LEVEL ANALYSIS
 # ────────────────────────────────────────
 if has_state_data():
-    st.subheader("State-Level Distribution")
+    st.subheader("State-Level Analysis")
 
     cat_options_state = dict(zip(cat_data["category_name"], cat_data["category_code"]))
     selected_cat_name = st.selectbox("Category for state analysis", list(cat_options_state.keys()), key="state_cat")

@@ -71,3 +71,65 @@ OEM_COLORS = [
 def get_oem_color(idx):
     """Get a color for an OEM by index."""
     return OEM_COLORS[idx % len(OEM_COLORS)]
+
+
+# ── Fiscal Year Helpers ──
+
+def get_fy_start_year(year, month):
+    """Get the fiscal year start year. FY26 starts Apr 2025 → returns 2025."""
+    return year if month >= 4 else year - 1
+
+
+def get_fy_label(fy_start):
+    """FY label from start year. 2025 → 'FY26'."""
+    return f"FY{str(fy_start + 1)[-2:]}"
+
+
+def get_fy_months(fy_start):
+    """Return all 12 (year, month) tuples for a fiscal year starting in April."""
+    months = []
+    for m in range(4, 13):  # Apr-Dec
+        months.append((fy_start, m))
+    for m in range(1, 4):  # Jan-Mar
+        months.append((fy_start + 1, m))
+    return months
+
+
+def get_fytd_months(year, month):
+    """Return (year, month) tuples from FY start to the given month (inclusive)."""
+    fy_start = get_fy_start_year(year, month)
+    all_months = get_fy_months(fy_start)
+    result = []
+    for y, m in all_months:
+        result.append((y, m))
+        if y == year and m == month:
+            break
+    return result
+
+
+def get_quarter_months(year, month):
+    """Return the 3 (year, month) tuples for the quarter containing (year, month)."""
+    if month in (4, 5, 6):
+        return [(year, 4), (year, 5), (year, 6)]
+    elif month in (7, 8, 9):
+        return [(year, 7), (year, 8), (year, 9)]
+    elif month in (10, 11, 12):
+        return [(year, 10), (year, 11), (year, 12)]
+    else:  # 1, 2, 3
+        return [(year, 1), (year, 2), (year, 3)]
+
+
+def get_prev_month(year, month):
+    """Return (year, month) for the previous month."""
+    if month == 1:
+        return (year - 1, 12)
+    return (year, month - 1)
+
+
+def get_prev_quarter_end(year, month):
+    """Return (year, month) for the last month of the previous quarter."""
+    q_map = {4: (year, 3), 5: (year, 3), 6: (year, 3),
+             7: (year, 6), 8: (year, 6), 9: (year, 6),
+             10: (year, 9), 11: (year, 9), 12: (year, 9),
+             1: (year - 1, 12), 2: (year - 1, 12), 3: (year - 1, 12)}
+    return q_map[month]
