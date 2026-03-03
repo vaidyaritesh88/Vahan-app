@@ -78,6 +78,16 @@ with tab2:
     will update existing records without creating duplicates.
     """)
 
+    # Cloud environment detection
+    import platform as _plat
+    _is_cloud = _plat.system() == "Linux" and "/home/appuser" in os.environ.get("HOME", "")
+    if _is_cloud:
+        st.warning(
+            "**Note:** The Vahan portal (govt. website) blocks cloud server IPs. "
+            "The scraper works best when you run the app **locally** (`streamlit run app.py`). "
+            "All other features (dashboards, charts, AI Chat) work fine on Streamlit Cloud."
+        )
+
     # Connection test
     col_test, col_info = st.columns([1, 2])
     with col_test:

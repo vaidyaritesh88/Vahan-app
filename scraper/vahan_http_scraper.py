@@ -1,18 +1,41 @@
 """HTTP-based scraper for Vahan portal — no Chrome/Selenium dependency.
 
 Uses requests + PrimeFaces AJAX to fetch state-level OEM registration data.
+
+NOTE: The Vahan portal (a Government of India website) often blocks cloud/
+datacenter IPs. This scraper works best when run from a local machine or
+residential IP. On Streamlit Cloud, the connection will likely be rejected.
 """
 import re
+import ssl
 import time
 import logging
+import platform
 import requests
 from datetime import datetime
+from requests.adapters import HTTPAdapter
 
 from config.settings import VAHAN_URL, VAHAN_SCRAPE_CONFIGS
 from config.oem_normalization import normalize_oem
 from database.schema import get_connection
 
 logger = logging.getLogger(__name__)
+
+
+class _TLSAdapter(HTTPAdapter):
+    """HTTPS adapter that uses a permissive TLS context.
+
+    Some government sites use older TLS configurations or ciphers that
+    Python's default strict settings reject. This adapter relaxes those.
+    """
+
+    def init_poolmanager(self, *args, **kwargs):
+        ctx = ssl.create_default_context()
+        ctx.set_ciphers("DEFAULT:@SECLEVEL=1")
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        kwargs["ssl_context"] = ctx
+        return super().init_poolmanager(*args, **kwargs)
 
 # Vahan portal state code mapping (our state name → portal code)
 STATE_CODES = {
@@ -65,7 +88,14 @@ MONTH_MAP = {
 
 
 class VahanHttpScraper:
-    """Scrapes Vahan portal using direct HTTP requests (no browser needed)."""
+    """Scrapes Vahan portal using direct HTTP requests (no browser needed).
+
+    NOTE: The Vahan portal blocks cloud/datacenter IPs. This scraper is
+    designed to run from a local machine. On Streamlit Cloud, the portal
+    will reject the connection (ConnectionResetError).
+    """
+
+    MAX_RETRIES = 3
 
     def __init__(self, timeout=30, verify_ssl=True):
         self.session = requests.Session()
@@ -74,10 +104,16 @@ class VahanHttpScraper:
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
             ),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
             "Accept-Encoding": "gzip, deflate, br",
             "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Cache-Control": "max-age=0",
         })
         self.timeout = timeout
         self.verify_ssl = verify_ssl
@@ -85,18 +121,47 @@ class VahanHttpScraper:
         self.viewstate = None
         self.form_url = VAHAN_URL
         self._page_loaded = False
+        self._is_cloud = self._detect_cloud_env()
+
+        # Mount TLS adapter for HTTPS to handle government site TLS quirks
+        self.session.mount("https://", _TLSAdapter())
 
         # Dynamic IDs discovered from page
         self._state_id = None
         self._number_format_id = None
+
+    @staticmethod
+    def _detect_cloud_env():
+        """Detect if we're running on Streamlit Cloud or similar."""
+        # Streamlit Cloud runs on Linux with appuser
+        import os
+        home = os.environ.get("HOME", "")
+        return (
+            platform.system() == "Linux"
+            and ("/home/appuser" in home or os.environ.get("STREAMLIT_RUNTIME", ""))
+        )
 
     def _load_page(self):
         """Load the initial page to get ViewState and session cookie."""
         if self._page_loaded:
             return
 
-        r = self.session.get(self.form_url, timeout=self.timeout, verify=self.verify_ssl)
-        r.raise_for_status()
+        last_error = None
+        for attempt in range(1, self.MAX_RETRIES + 1):
+            try:
+                r = self.session.get(self.form_url, timeout=self.timeout, verify=self.verify_ssl)
+                r.raise_for_status()
+                break
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                last_error = e
+                if attempt < self.MAX_RETRIES:
+                    wait = attempt * 2
+                    logger.warning(f"Connection attempt {attempt} failed: {e}. Retrying in {wait}s...")
+                    time.sleep(wait)
+                else:
+                    raise
+            except Exception:
+                raise
 
         self.viewstate = self._extract_viewstate(r.text)
         if not self.viewstate:
@@ -502,13 +567,13 @@ class VahanHttpScraper:
 
         Automatically retries with SSL verification disabled if the first
         attempt fails due to an SSL error (common in corporate networks).
+        Detects cloud environment and gives clear guidance.
         """
         try:
             self._page_loaded = False
             self._load_page()
             return True, "Connected to Vahan portal successfully."
         except requests.exceptions.SSLError as e:
-            # SSL certificate error — often caused by corporate proxy / SSL inspection
             logger.warning(f"SSL error on first attempt: {e}")
             return self._retry_without_ssl(
                 f"SSL certificate error (likely corporate proxy). "
@@ -517,19 +582,40 @@ class VahanHttpScraper:
         except requests.exceptions.ProxyError as e:
             return False, f"Proxy blocked the connection. Detail: {str(e)[:150]}"
         except requests.exceptions.ConnectionError as e:
-            # ConnectionError can wrap SSL errors too — check the underlying cause
             inner = str(e)
+            # Check if SSL-related
             if "SSL" in inner or "CERTIFICATE" in inner.upper() or "ssl" in inner:
                 logger.warning(f"SSL-related ConnectionError: {e}")
                 return self._retry_without_ssl(
                     f"SSL/certificate error (likely corporate proxy). "
                     f"Detail: {inner[:150]}"
                 )
+            # Connection reset / refused — likely IP-based blocking
+            if "reset" in inner.lower() or "refused" in inner.lower() or "aborted" in inner.lower():
+                msg = (
+                    "**Connection rejected by Vahan portal** (connection reset by server).\n\n"
+                )
+                if self._is_cloud:
+                    msg += (
+                        "This is expected on **Streamlit Cloud** — the Vahan portal "
+                        "(a Government of India website) blocks requests from cloud/datacenter IPs.\n\n"
+                        "**The scraper is designed to run from a local machine.** "
+                        "To scrape data:\n"
+                        "1. Run the app locally: `streamlit run app.py`\n"
+                        "2. Use the scraper from your local machine\n"
+                        "3. Push the updated database to deploy\n\n"
+                        "All other features (dashboards, charts, AI Chat) work fine on Streamlit Cloud."
+                    )
+                else:
+                    msg += (
+                        "The Vahan portal may be temporarily down, or your network/firewall "
+                        "is blocking the connection. Try again in a few minutes."
+                    )
+                return False, msg
             return False, f"Could not connect to Vahan portal. Detail: {inner[:200]}"
         except requests.exceptions.Timeout:
             return False, "Connection timed out. The Vahan portal may be slow or unreachable."
         except RuntimeError as e:
-            # ViewState extraction failure — portal responded but page structure changed
             return False, f"Portal responded but page parsing failed: {str(e)}"
         except Exception as e:
             return False, f"Connection failed: {type(e).__name__}: {str(e)[:200]}"
@@ -544,7 +630,6 @@ class VahanHttpScraper:
             self.verify_ssl = False
             self.session.verify = False
 
-            # Suppress InsecureRequestWarning for this session
             import urllib3
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -556,7 +641,7 @@ class VahanHttpScraper:
             )
         except Exception as retry_err:
             return False, (
-                f"Initial error: {original_error_msg}\n"
+                f"Initial error: {original_error_msg}\n\n"
                 f"Retry without SSL also failed: {str(retry_err)[:150]}"
             )
 
