@@ -1,6 +1,11 @@
 """All database query functions used by the Streamlit pages."""
 import pandas as pd
 from database.schema import get_connection
+from components.formatters import (
+    get_fy_start_year, get_fy_label, get_fytd_months,
+    get_quarter_months, get_prev_month, get_prev_quarter_end,
+    format_quarter, format_fy,
+)
 
 
 def _query_df(sql, params=None):
@@ -472,3 +477,418 @@ def get_record_counts():
         counts[table] = cursor.fetchone()[0]
     conn.close()
     return counts
+
+
+# ──────────────────────────────────────────────
+# OEM GROWTH RATES (MoM, QoQ, YoY)
+# ──────────────────────────────────────────────
+
+def _sum_volume_for_months(category_code, month_list):
+    """Get OEM volumes summed over a list of (year, month) tuples."""
+    if not month_list:
+        return pd.DataFrame(columns=["oem_name", "volume"])
+    conditions = " OR ".join(["(year = ? AND month = ?)"] * len(month_list))
+    params = [category_code]
+    for y, m in month_list:
+        params.extend([y, m])
+    df = _query_df(f"""
+        SELECT oem_name, SUM(volume) as volume
+        FROM national_monthly
+        WHERE category_code = ? AND ({conditions}) AND volume > 0
+        GROUP BY oem_name
+    """, params)
+    return df
+
+
+def get_oem_growth_rates(category_code, year, month, top_n=10):
+    """Get MoM, QoQ, YoY growth rates for top N OEMs in a category.
+
+    Returns DataFrame with columns: oem_name, volume, share_pct,
+        mom_pct, qoq_pct, yoy_pct
+    """
+    # Current month volumes
+    current = _query_df("""
+        SELECT oem_name, volume FROM national_monthly
+        WHERE category_code = ? AND year = ? AND month = ? AND volume > 0
+        ORDER BY volume DESC
+    """, [category_code, year, month])
+
+    if current.empty:
+        return pd.DataFrame()
+
+    total = current["volume"].sum()
+    current["share_pct"] = (current["volume"] / total * 100).round(1)
+
+    # Top N
+    if top_n and len(current) > top_n:
+        current = current.head(top_n)
+
+    oem_list = current["oem_name"].tolist()
+
+    # Previous month (MoM)
+    pm_y, pm_m = get_prev_month(year, month)
+    prev_month = _query_df("""
+        SELECT oem_name, volume as prev_m_vol FROM national_monthly
+        WHERE category_code = ? AND year = ? AND month = ? AND volume > 0
+    """, [category_code, pm_y, pm_m])
+
+    # Current quarter and previous quarter (QoQ)
+    curr_q_months = get_quarter_months(year, month)
+    pq_end_y, pq_end_m = get_prev_quarter_end(year, month)
+    prev_q_months = get_quarter_months(pq_end_y, pq_end_m)
+
+    curr_q = _sum_volume_for_months(category_code, curr_q_months)
+    curr_q = curr_q.rename(columns={"volume": "curr_q_vol"})
+    prev_q = _sum_volume_for_months(category_code, prev_q_months)
+    prev_q = prev_q.rename(columns={"volume": "prev_q_vol"})
+
+    # Same month last year (YoY)
+    prev_year = _query_df("""
+        SELECT oem_name, volume as prev_y_vol FROM national_monthly
+        WHERE category_code = ? AND year = ? AND month = ? AND volume > 0
+    """, [category_code, year - 1, month])
+
+    # Merge all
+    df = current.merge(prev_month, on="oem_name", how="left")
+    df = df.merge(curr_q, on="oem_name", how="left")
+    df = df.merge(prev_q, on="oem_name", how="left")
+    df = df.merge(prev_year, on="oem_name", how="left")
+
+    # Calculate growth rates
+    df["mom_pct"] = ((df["volume"] / df["prev_m_vol"]) - 1).mul(100).round(1)
+    df["qoq_pct"] = ((df["curr_q_vol"] / df["prev_q_vol"]) - 1).mul(100).round(1)
+    df["yoy_pct"] = ((df["volume"] / df["prev_y_vol"]) - 1).mul(100).round(1)
+
+    return df[["oem_name", "volume", "share_pct", "mom_pct", "qoq_pct", "yoy_pct"]]
+
+
+# ──────────────────────────────────────────────
+# QUARTERLY / FYTD / ANNUAL AGGREGATIONS
+# ──────────────────────────────────────────────
+
+def get_oem_quarterly_share(category_code, top_n=7, num_quarters=8):
+    """Get OEM market share aggregated by FY quarter.
+
+    Returns DataFrame: oem_name, quarter_label, volume, total_volume, share_pct
+    """
+    df = _query_df("""
+        SELECT oem_name, year, month, volume
+        FROM national_monthly
+        WHERE category_code = ? AND volume > 0
+    """, [category_code])
+
+    if df.empty:
+        return pd.DataFrame()
+
+    # Assign quarter labels
+    df["quarter"] = df.apply(lambda r: format_quarter(r["year"], r["month"]), axis=1)
+    df["fy_start"] = df.apply(lambda r: get_fy_start_year(r["year"], r["month"]), axis=1)
+    df["q_num"] = df["month"].map({4:1,5:1,6:1,7:2,8:2,9:2,10:3,11:3,12:3,1:4,2:4,3:4})
+    df["sort_key"] = df["fy_start"] * 10 + df["q_num"]
+
+    # Aggregate by quarter
+    q_data = df.groupby(["oem_name", "quarter", "sort_key"], as_index=False)["volume"].sum()
+    q_totals = q_data.groupby(["quarter", "sort_key"], as_index=False)["volume"].sum()
+    q_totals = q_totals.rename(columns={"volume": "total_volume"})
+
+    q_data = q_data.merge(q_totals, on=["quarter", "sort_key"], how="left")
+    q_data["share_pct"] = (q_data["volume"] / q_data["total_volume"] * 100).round(1)
+
+    # Keep only the latest N quarters
+    quarters_sorted = q_data[["quarter", "sort_key"]].drop_duplicates().sort_values("sort_key", ascending=False)
+    keep_quarters = quarters_sorted.head(num_quarters)["quarter"].tolist()
+    q_data = q_data[q_data["quarter"].isin(keep_quarters)]
+
+    # Filter to top N OEMs (by latest quarter volume)
+    latest_q = quarters_sorted.iloc[0]["quarter"]
+    top_oems = q_data[q_data["quarter"] == latest_q].nlargest(top_n, "volume")["oem_name"].tolist()
+    q_data = q_data[q_data["oem_name"].isin(top_oems)]
+    q_data = q_data.sort_values("sort_key")
+
+    return q_data
+
+
+def get_oem_annual_share(category_code, top_n=7):
+    """Get OEM market share aggregated by full fiscal year.
+
+    Returns DataFrame: oem_name, fy_label, volume, total_volume, share_pct
+    """
+    df = _query_df("""
+        SELECT oem_name, year, month, volume
+        FROM national_monthly
+        WHERE category_code = ? AND volume > 0
+    """, [category_code])
+
+    if df.empty:
+        return pd.DataFrame()
+
+    df["fy_start"] = df.apply(lambda r: get_fy_start_year(r["year"], r["month"]), axis=1)
+    df["fy_label"] = df["fy_start"].apply(get_fy_label)
+
+    # Aggregate by FY
+    fy_data = df.groupby(["oem_name", "fy_label", "fy_start"], as_index=False)["volume"].sum()
+    fy_totals = fy_data.groupby(["fy_label", "fy_start"], as_index=False)["volume"].sum()
+    fy_totals = fy_totals.rename(columns={"volume": "total_volume"})
+
+    fy_data = fy_data.merge(fy_totals, on=["fy_label", "fy_start"], how="left")
+    fy_data["share_pct"] = (fy_data["volume"] / fy_data["total_volume"] * 100).round(1)
+
+    # Top N by latest FY
+    latest_fy = fy_data["fy_start"].max()
+    top_oems = fy_data[fy_data["fy_start"] == latest_fy].nlargest(top_n, "volume")["oem_name"].tolist()
+    fy_data = fy_data[fy_data["oem_name"].isin(top_oems)]
+    fy_data = fy_data.sort_values("fy_start")
+
+    return fy_data
+
+
+def get_oem_fytd_share(category_code, year, month, top_n=7):
+    """Get OEM market share for FYTD (Apr to selected month) with YoY comparison.
+
+    Returns DataFrame: oem_name, fytd_vol, fytd_share, prev_fytd_vol, prev_fytd_share, yoy_pct
+    """
+    fytd_months = get_fytd_months(year, month)
+    curr_fytd = _sum_volume_for_months(category_code, fytd_months)
+    curr_fytd = curr_fytd.rename(columns={"volume": "fytd_vol"})
+
+    # Previous year FYTD (same months, shifted back 1 year)
+    prev_fytd_months = [(y - 1, m) for y, m in fytd_months]
+    prev_fytd = _sum_volume_for_months(category_code, prev_fytd_months)
+    prev_fytd = prev_fytd.rename(columns={"volume": "prev_fytd_vol"})
+
+    if curr_fytd.empty:
+        return pd.DataFrame()
+
+    curr_total = curr_fytd["fytd_vol"].sum()
+    curr_fytd["fytd_share"] = (curr_fytd["fytd_vol"] / curr_total * 100).round(1)
+
+    # Top N
+    df = curr_fytd.nlargest(top_n, "fytd_vol").copy()
+    df = df.merge(prev_fytd, on="oem_name", how="left")
+
+    prev_total = prev_fytd["prev_fytd_vol"].sum() if not prev_fytd.empty else 0
+    if prev_total > 0:
+        df["prev_fytd_share"] = (df["prev_fytd_vol"] / prev_total * 100).round(1)
+    else:
+        df["prev_fytd_share"] = None
+
+    df["yoy_pct"] = ((df["fytd_vol"] / df["prev_fytd_vol"]) - 1).mul(100).round(1)
+
+    fy_start = get_fy_start_year(year, month)
+    df["fy_label"] = get_fy_label(fy_start)
+    df["prev_fy_label"] = get_fy_label(fy_start - 1)
+
+    return df
+
+
+# ──────────────────────────────────────────────
+# OEM STATE MARKET SHARE
+# ──────────────────────────────────────────────
+
+def get_oem_state_market_shares(oem_name, category_code, year, month):
+    """Get an OEM's market share in each state (volume + share within that state).
+
+    Returns DataFrame: state, oem_volume, state_total, share_pct
+    """
+    # OEM volumes by state
+    oem_state = _query_df("""
+        SELECT state, volume as oem_volume
+        FROM state_monthly
+        WHERE oem_name = ? AND category_code = ? AND year = ? AND month = ?
+        ORDER BY volume DESC
+    """, [oem_name, category_code, year, month])
+
+    if oem_state.empty:
+        return pd.DataFrame()
+
+    # Total volumes by state
+    state_totals = _query_df("""
+        SELECT state, SUM(volume) as state_total
+        FROM state_monthly
+        WHERE category_code = ? AND year = ? AND month = ?
+        GROUP BY state
+    """, [category_code, year, month])
+
+    df = oem_state.merge(state_totals, on="state", how="left")
+    df["share_pct"] = (df["oem_volume"] / df["state_total"] * 100).round(1)
+
+    # Also compute contribution % (what % of OEM's total comes from each state)
+    oem_total = df["oem_volume"].sum()
+    df["contribution_pct"] = (df["oem_volume"] / oem_total * 100).round(1) if oem_total > 0 else 0
+
+    return df.sort_values("oem_volume", ascending=False)
+
+
+# ──────────────────────────────────────────────
+# STATE-LEVEL EV PENETRATION
+# ──────────────────────────────────────────────
+
+def get_state_ev_penetration(base_category_code, year, month):
+    """Get EV penetration by state for a base category (e.g., 2W → EV_2W/2W).
+
+    Returns DataFrame: state, base_volume, ev_volume, ev_penetration_pct
+    """
+    ev_code_map = {"2W": "EV_2W", "PV": "EV_PV", "3W": "EV_3W"}
+    ev_code = ev_code_map.get(base_category_code)
+    if not ev_code:
+        return pd.DataFrame()
+
+    # Base category state totals
+    base = _query_df("""
+        SELECT state, SUM(volume) as base_volume
+        FROM state_monthly
+        WHERE category_code = ? AND year = ? AND month = ?
+        GROUP BY state
+    """, [base_category_code, year, month])
+
+    # EV state totals
+    ev = _query_df("""
+        SELECT state, SUM(volume) as ev_volume
+        FROM state_monthly
+        WHERE category_code = ? AND year = ? AND month = ?
+        GROUP BY state
+    """, [ev_code, year, month])
+
+    if base.empty:
+        return pd.DataFrame()
+
+    df = base.merge(ev, on="state", how="left")
+    df["ev_volume"] = df["ev_volume"].fillna(0)
+    df["ev_penetration_pct"] = (df["ev_volume"] / df["base_volume"] * 100).round(2)
+
+    return df.sort_values("ev_penetration_pct", ascending=False)
+
+
+# ──────────────────────────────────────────────
+# FUEL-TYPE AWARE OEM HELPERS
+# ──────────────────────────────────────────────
+
+def get_oem_fuel_type_context(oem_name):
+    """Determine which category types an OEM participates in.
+
+    Returns dict: {base_category: [list of category_codes]}
+    e.g., for Ather: {"2W": ["EV_2W"]}
+    e.g., for Tata Motors: {"PV": ["PV", "EV_PV"], "CV": ["CV"]}
+    """
+    cats = _query_df("""
+        SELECT DISTINCT n.category_code, c.is_subsegment, c.base_category_code
+        FROM national_monthly n
+        JOIN categories c ON n.category_code = c.code
+        WHERE n.oem_name = ? AND n.volume > 0
+    """, [oem_name])
+
+    result = {}
+    for _, row in cats.iterrows():
+        code = row["category_code"]
+        base = row["base_category_code"] if row["is_subsegment"] else code
+        if base not in result:
+            result[base] = []
+        result[base].append(code)
+
+    return result
+
+
+def get_relevant_comparison_category(oem_name, base_category):
+    """For an OEM in a base category, determine the right comparison universe.
+
+    Since total category (e.g., 2W) includes EV volumes, an EV-only OEM like Ather
+    appears in both 2W and EV_2W. We detect pure EV players by comparing their
+    volume in the EV subsegment to their total base category volume. If >=80% of
+    their volume is EV, we consider them an EV player and compare within EV universe.
+    """
+    ev_code_map = {"2W": "EV_2W", "PV": "EV_PV", "3W": "EV_3W"}
+    ev_code = ev_code_map.get(base_category)
+    if not ev_code:
+        return base_category
+
+    # Get latest month volumes for comparison
+    latest = get_available_months()
+    if not latest:
+        return base_category
+    ly, lm = latest[0]
+
+    # OEM's volume in the base category (total, includes EV)
+    base_vol = _query_df("""
+        SELECT volume FROM national_monthly
+        WHERE oem_name = ? AND category_code = ? AND year = ? AND month = ?
+    """, [oem_name, base_category, ly, lm])
+
+    # OEM's volume in the EV subsegment
+    ev_vol = _query_df("""
+        SELECT volume FROM national_monthly
+        WHERE oem_name = ? AND category_code = ? AND year = ? AND month = ?
+    """, [oem_name, ev_code, ly, lm])
+
+    base_v = base_vol["volume"].iloc[0] if not base_vol.empty else 0
+    ev_v = ev_vol["volume"].iloc[0] if not ev_vol.empty else 0
+
+    # If OEM has EV data but no base category data → pure EV player
+    if ev_v > 0 and base_v == 0:
+        return ev_code
+
+    # If OEM has EV data and >=80% of base volume is EV → EV player
+    if ev_v > 0 and base_v > 0 and (ev_v / base_v) >= 0.80:
+        return ev_code
+
+    return base_category
+
+
+# ──────────────────────────────────────────────
+# OEM COMPARISON (MULTI-OEM)
+# ──────────────────────────────────────────────
+
+def get_multi_oem_monthly_trend(category_code, oem_names, months=24):
+    """Get monthly volume + share for multiple OEMs over last N months."""
+    if not oem_names:
+        return pd.DataFrame()
+
+    # Get the last N distinct months to filter
+    month_df = _query_df("""
+        SELECT DISTINCT year, month FROM national_monthly
+        WHERE category_code = ? AND volume > 0
+        ORDER BY year DESC, month DESC LIMIT ?
+    """, [category_code, months])
+
+    if month_df.empty:
+        return pd.DataFrame()
+
+    month_conditions = " OR ".join(["(n.year = ? AND n.month = ?)"] * len(month_df))
+    month_params = []
+    for _, r in month_df.iterrows():
+        month_params.extend([int(r["year"]), int(r["month"])])
+
+    placeholders = ",".join(["?"] * len(oem_names))
+    df = _query_df(f"""
+        SELECT n.oem_name, n.year, n.month, n.volume
+        FROM national_monthly n
+        WHERE n.category_code = ? AND n.oem_name IN ({placeholders})
+              AND ({month_conditions}) AND n.volume > 0
+        ORDER BY n.year, n.month
+    """, [category_code] + oem_names + month_params)
+
+    if df.empty:
+        return df
+
+    # Get category totals
+    totals = _query_df("""
+        SELECT year, month, SUM(volume) as total_volume
+        FROM national_monthly
+        WHERE category_code = ?
+        GROUP BY year, month
+    """, [category_code])
+
+    df = df.merge(totals, on=["year", "month"], how="left")
+    df["share_pct"] = (df["volume"] / df["total_volume"] * 100).round(1)
+    df["date"] = pd.to_datetime(df[["year", "month"]].assign(day=1))
+
+    return df
+
+
+def get_top_oems_for_category(category_code, year, month, top_n=5):
+    """Get the top N OEM names by volume for a category in a given month."""
+    df = _query_df("""
+        SELECT oem_name FROM national_monthly
+        WHERE category_code = ? AND year = ? AND month = ? AND oem_name != 'Others' AND volume > 0
+        ORDER BY volume DESC LIMIT ?
+    """, [category_code, year, month, top_n])
+    return df["oem_name"].tolist()
