@@ -405,89 +405,63 @@ class VahanHttpScraper:
         """Check if the response contains a data table with results."""
         return "<tbody" in html and ("<td" in html)
 
-    def _detect_datatable_pagination(self, html):
-        """Detect PrimeFaces DataTable ID and pagination info from response HTML.
+    def _find_datatable_id(self, html):
+        """Find the PrimeFaces DataTable widget ID from response HTML.
 
-        Returns (datatable_id, rows_per_page, total_rows) or (None, 0, 0) if
-        no pagination is found.
+        Searches both raw HTML and CDATA blocks. Handles HTML attributes in
+        any order (id before class or class before id).
+
+        Returns the DataTable ID string, or None if not found.
         """
-        # Look for DataTable widget ID in CDATA blocks or raw HTML
         search_text = html
         cdata_blocks = re.findall(r'<!\[CDATA\[(.*?)\]\]>', html, re.DOTALL)
         if cdata_blocks:
             search_text = " ".join(cdata_blocks)
 
-        # Find the datatable container div: <div id="XYZ" class="...ui-datatable...">
-        dt_match = re.search(
-            r'<div[^>]*id="([^"]*)"[^>]*class="[^"]*ui-datatable[^"]*"',
-            search_text,
-        )
-        if not dt_match:
-            return None, 0, 0
+        # Strategy 1: <div id="X" class="...ui-datatable...">
+        m = re.search(r'<div[^>]*id="([^"]*)"[^>]*class="[^"]*ui-datatable[^"]*"', search_text)
+        if m:
+            logger.info(f"Found DataTable ID (div id before class): {m.group(1)}")
+            return m.group(1)
 
-        dt_id = dt_match.group(1)
+        # Strategy 2: <div class="...ui-datatable..." id="X">  (reversed attr order)
+        m = re.search(r'<div[^>]*class="[^"]*ui-datatable[^"]*"[^>]*id="([^"]*)"', search_text)
+        if m:
+            logger.info(f"Found DataTable ID (div class before id): {m.group(1)}")
+            return m.group(1)
 
-        # Look for paginator info.
-        # PrimeFaces paginator renders something like:
-        # <span class="ui-paginator-current">(1 of 10)</span>
-        # or shows page links: <a class="ui-paginator-page ...">1</a> ... <a>10</a>
-        # or has rows-per-page dropdown with total row count in the widget config.
+        # Strategy 3: Look for <table> with ui-datatable class
+        m = re.search(r'<table[^>]*id="([^"]*)"[^>]*class="[^"]*ui-datatable[^"]*"', search_text)
+        if m:
+            logger.info(f"Found DataTable ID (table element): {m.group(1)}")
+            return m.group(1)
 
-        # Method 1: Look for "({current} of {total})" pattern in paginator
-        page_match = re.search(
-            r'ui-paginator-current[^>]*>\s*\(?\s*(\d+)\s+of\s+(\d+)\s*\)?',
-            search_text,
-        )
-        if page_match:
-            current_page = int(page_match.group(1))
-            total_pages = int(page_match.group(2))
-            # Try to find rows per page from the paginator dropdown or default
-            rpp_match = re.search(
-                r'<option[^>]*selected[^>]*>(\d+)</option>',
-                search_text,
-            )
-            rows_per_page = int(rpp_match.group(1)) if rpp_match else 25
-            total_rows = total_pages * rows_per_page
-            logger.info(f"DataTable '{dt_id}': page {current_page}/{total_pages}, "
-                        f"{rows_per_page} rows/page, ~{total_rows} total rows")
-            return dt_id, rows_per_page, total_rows
+        # Strategy 4: Look for any element with datatable-related id pattern
+        # PrimeFaces datatable IDs often contain 'groupingTable', 'dataTable', or 'j_idt'
+        m = re.search(r'id="([^"]*(?:groupingTable|dataTable|datatable)[^"]*)"', search_text, re.IGNORECASE)
+        if m:
+            logger.info(f"Found DataTable ID (name pattern): {m.group(1)}")
+            return m.group(1)
 
-        # Method 2: Count page link buttons to determine total pages
-        page_links = re.findall(
-            r'<(?:a|span)[^>]*class="[^"]*ui-paginator-page[^"]*"[^>]*>(\d+)',
-            search_text,
-        )
-        if page_links:
-            total_pages = max(int(p) for p in page_links)
-            # Count rows in the current tbody to determine rows per page
-            tbody_match = re.search(r'<tbody[^>]*>(.*?)</tbody>', search_text, re.DOTALL)
-            if tbody_match:
-                current_rows = len(re.findall(r'<tr[^>]*>', tbody_match.group(1)))
-                rows_per_page = current_rows if current_rows > 0 else 25
-            else:
-                rows_per_page = 25
-            total_rows = total_pages * rows_per_page
-            logger.info(f"DataTable '{dt_id}': {total_pages} pages, "
-                        f"{rows_per_page} rows/page, ~{total_rows} total rows")
-            return dt_id, rows_per_page, total_rows
+        # Strategy 5: Look for _paginator suffix which implies a DataTable
+        m = re.search(r'id="([^"]*?)_paginator', search_text)
+        if m:
+            logger.info(f"Found DataTable ID (from paginator): {m.group(1)}")
+            return m.group(1)
 
-        # Method 3: Check if paginator div exists at all
-        has_paginator = bool(re.search(
-            r'ui-paginator', search_text,
-        ))
-        if has_paginator:
-            # Paginator exists but we couldn't parse details — assume multi-page
-            tbody_match = re.search(r'<tbody[^>]*>(.*?)</tbody>', search_text, re.DOTALL)
-            if tbody_match:
-                current_rows = len(re.findall(r'<tr[^>]*>', tbody_match.group(1)))
-                rows_per_page = current_rows if current_rows > 0 else 25
-            else:
-                rows_per_page = 25
-            # We don't know total — will paginate until empty
-            logger.info(f"DataTable '{dt_id}': paginator detected, {rows_per_page} rows/page, total unknown")
-            return dt_id, rows_per_page, -1  # -1 = unknown total
+        logger.warning("Could not find DataTable ID in response HTML")
+        return None
 
-        return None, 0, 0
+    def _count_tbody_rows(self, html):
+        """Count the number of <tr> rows in the first <tbody> found."""
+        search_text = html
+        cdata_blocks = re.findall(r'<!\[CDATA\[(.*?)\]\]>', html, re.DOTALL)
+        if cdata_blocks:
+            search_text = " ".join(cdata_blocks)
+        tbody_match = re.search(r'<tbody[^>]*>(.*?)</tbody>', search_text, re.DOTALL)
+        if tbody_match:
+            return len(re.findall(r'<tr[^>]*>', tbody_match.group(1)))
+        return 0
 
     def _fetch_datatable_page(self, dt_id, first, rows_per_page):
         """Fetch a specific page of a PrimeFaces DataTable via AJAX pagination.
@@ -510,6 +484,8 @@ class VahanHttpScraper:
             f"{dt_id}_pagination": "true",
             f"{dt_id}_first": str(first),
             f"{dt_id}_rows": str(rows_per_page),
+            f"{dt_id}_skipChildren": "true",
+            f"{dt_id}_encodeFeature": "true",
             "masterLayout_formlogin": "masterLayout_formlogin",
             "javax.faces.ViewState": self.viewstate,
         }
@@ -525,6 +501,87 @@ class VahanHttpScraper:
             self.viewstate = new_vs
 
         return r.text
+
+    def _fetch_all_datatable_rows(self, response_html, first_page_records):
+        """Fetch all rows from a paginated PrimeFaces DataTable.
+
+        Tries two strategies:
+        1. Request all rows at once (rows=500) — fast if the server allows it.
+        2. Page through incrementally — reliable fallback.
+
+        If pagination fails entirely, returns first_page_records unchanged.
+        """
+        dt_id = self._find_datatable_id(response_html)
+        if not dt_id:
+            logger.info("No DataTable ID found — returning first page data only")
+            return first_page_records
+
+        first_page_row_count = self._count_tbody_rows(response_html)
+        first_page_oems = len(set(r["oem_raw"] for r in first_page_records)) if first_page_records else 0
+        logger.info(f"First page: {first_page_row_count} table rows, "
+                    f"{first_page_oems} unique OEMs, DataTable ID: '{dt_id}'")
+
+        # If first page has very few rows, it's possibly not paginated
+        if first_page_row_count <= 2:
+            return first_page_records
+
+        # ── Strategy 1: Request ALL rows at once (rows=500) ──
+        try:
+            logger.info(f"Strategy 1: Requesting all rows at once (first=0, rows=500)")
+            all_html = self._fetch_datatable_page(dt_id, 0, 500)
+            all_records = self._extract_table(all_html)
+            all_oems = len(set(r["oem_raw"] for r in all_records)) if all_records else 0
+            logger.info(f"Strategy 1 result: {len(all_records)} records, {all_oems} unique OEMs")
+
+            if all_oems > first_page_oems:
+                logger.info(f"Strategy 1 SUCCESS: got {all_oems} OEMs (vs {first_page_oems} on first page)")
+                return all_records
+            else:
+                logger.info("Strategy 1: no additional OEMs — server may cap page size")
+        except Exception as e:
+            logger.warning(f"Strategy 1 failed: {e}")
+
+        # ── Strategy 2: Page through one page at a time ──
+        logger.info(f"Strategy 2: Paginating page by page (rows_per_page={first_page_row_count})")
+        all_records = list(first_page_records)
+        seen_oems = set(r["oem_raw"] for r in all_records)
+        rows_per_page = first_page_row_count
+
+        for page_num in range(2, 50):  # Safety limit: max 50 pages
+            first = (page_num - 1) * rows_per_page
+            try:
+                time.sleep(0.5)
+                page_html = self._fetch_datatable_page(dt_id, first, rows_per_page)
+                page_records = self._extract_table(page_html)
+
+                if not page_records:
+                    logger.info(f"Page {page_num}: empty — reached end of data")
+                    break
+
+                # Check if we're getting duplicate data (server looping back)
+                new_oems = set(r["oem_raw"] for r in page_records) - seen_oems
+                if not new_oems and page_num > 2:
+                    logger.info(f"Page {page_num}: all OEMs already seen — stopping")
+                    break
+
+                all_records.extend(page_records)
+                seen_oems.update(r["oem_raw"] for r in page_records)
+                logger.info(f"Page {page_num}: +{len(page_records)} records, "
+                            f"+{len(new_oems)} new OEMs (total: {len(all_records)} records, "
+                            f"{len(seen_oems)} OEMs)")
+
+            except Exception as e:
+                logger.warning(f"Page {page_num} failed: {e}")
+                break
+
+        total_oems = len(seen_oems)
+        if total_oems > first_page_oems:
+            logger.info(f"Strategy 2 SUCCESS: {total_oems} OEMs across "
+                        f"{len(all_records)} records (vs {first_page_oems} on first page)")
+        else:
+            logger.info(f"Strategy 2: no additional OEMs found — table may not be paginated")
+
+        return all_records
 
     def _extract_table(self, html):
         """Parse the Maker x Month data table from AJAX response HTML.
@@ -646,46 +703,14 @@ class VahanHttpScraper:
         response_html = self._find_and_click_refresh(state_code, year, config)
 
         # Parse the first page
-        all_records = self._extract_table(response_html)
+        first_page_records = self._extract_table(response_html)
+        logger.info(f"First page: {len(first_page_records)} records for "
+                    f"{category_code}/{state_name}/{year}")
 
-        # Check for pagination — the Vahan DataTable may have multiple pages
-        dt_id, rows_per_page, total_rows = self._detect_datatable_pagination(response_html)
+        # Fetch all pages (handles pagination automatically)
+        all_records = self._fetch_all_datatable_rows(response_html, first_page_records)
 
-        if dt_id and rows_per_page > 0:
-            # Fetch remaining pages
-            max_pages = 50  # Safety limit
-            page_num = 2
-            first = rows_per_page  # Start of second page
-
-            while page_num <= max_pages:
-                # If we know the total, check if we've fetched enough
-                if total_rows > 0 and first >= total_rows:
-                    break
-
-                try:
-                    time.sleep(0.5)  # Brief delay between page requests
-                    page_html = self._fetch_datatable_page(dt_id, first, rows_per_page)
-                    page_records = self._extract_table(page_html)
-
-                    if not page_records:
-                        # No more data — we've reached the end
-                        break
-
-                    all_records.extend(page_records)
-                    logger.info(f"Page {page_num}: {len(page_records)} records "
-                                f"(total so far: {len(all_records)})")
-
-                    first += rows_per_page
-                    page_num += 1
-
-                except Exception as e:
-                    logger.warning(f"Pagination page {page_num} failed: {e}")
-                    break
-
-            logger.info(f"Fetched {page_num - 1} pages total for "
-                        f"{category_code}/{state_name}/{year}")
-
-        logger.info(f"Parsed {len(all_records)} records for {category_code}/{state_name}/{year}")
+        logger.info(f"Total: {len(all_records)} records for {category_code}/{state_name}/{year}")
         return all_records
 
     def scrape_and_store(self, category_code, state_name, year):
