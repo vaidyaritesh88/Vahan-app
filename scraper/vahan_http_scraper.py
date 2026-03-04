@@ -504,32 +504,85 @@ class VahanHttpScraper:
             return len(re.findall(r'<tr[^>]*>', tbody_match.group(1)))
         return 0
 
-    def _fetch_datatable_page(self, dt_id, first, rows_per_page):
-        """Fetch a specific page of a PrimeFaces DataTable via AJAX pagination.
+    def _parse_datatable_config(self, html):
+        """Extract PrimeFaces DataTable widget config from response HTML.
+
+        Parses the PrimeFaces.cw("DataTable",...) JavaScript call to get:
+        - dt_id: DataTable component ID (e.g., 'groupingTable')
+        - rows_per_page: rows per page from paginator config
+        - row_count: total row count
+        - scrollable: whether it's a scrollable DataTable
+
+        Returns dict with keys: dt_id, rows_per_page, row_count, scrollable
+        """
+        m = re.search(
+            r'PrimeFaces\.cw\("DataTable","([^"]+)",\{id:"([^"]+)"'
+            r'(?:.*?rows:(\d+))?'
+            r'(?:.*?rowCount:(\d+))?'
+            r'(?:.*?scrollable:(true|false))?'
+            r'(?:.*?scrollLimit:(\d+))?',
+            html
+        )
+        if m:
+            config = {
+                "widget_var": m.group(1),
+                "dt_id": m.group(2),
+                "rows_per_page": int(m.group(3)) if m.group(3) else 25,
+                "row_count": int(m.group(4)) if m.group(4) else 0,
+                "scrollable": m.group(5) == "true" if m.group(5) else False,
+                "scroll_limit": int(m.group(6)) if m.group(6) else 0,
+            }
+            logger.info(f"DataTable config: {config}")
+            return config
+        return None
+
+    def _fetch_datatable_page(self, dt_id, first, rows_per_page, scrollable=False):
+        """Fetch a specific page/scroll batch of a PrimeFaces DataTable.
+
+        For scrollable DataTables, uses the scroll-load mechanism.
+        For standard DataTables, uses the page event.
 
         Args:
             dt_id: DataTable widget ID (e.g., 'groupingTable')
-            first: 0-based row offset (0 for page 1, rows_per_page for page 2, etc.)
-            rows_per_page: Number of rows per page
+            first: 0-based row offset
+            rows_per_page: Number of rows per page/scroll batch
+            scrollable: If True, use scroll-load instead of page event
 
         Returns:
             Response HTML text.
         """
-        data = {
-            "javax.faces.partial.ajax": "true",
-            "javax.faces.source": dt_id,
-            "javax.faces.partial.execute": dt_id,
-            "javax.faces.partial.render": dt_id,
-            "javax.faces.behavior.event": "page",
-            "javax.faces.partial.event": "page",
-            f"{dt_id}_pagination": "true",
-            f"{dt_id}_first": str(first),
-            f"{dt_id}_rows": str(rows_per_page),
-            f"{dt_id}_skipChildren": "true",
-            f"{dt_id}_encodeFeature": "true",
-            "masterLayout_formlogin": "masterLayout_formlogin",
-            "javax.faces.ViewState": self.viewstate,
-        }
+        if scrollable:
+            # PrimeFaces scrollable DataTable uses a different AJAX format
+            data = {
+                "javax.faces.partial.ajax": "true",
+                "javax.faces.source": dt_id,
+                "javax.faces.partial.execute": dt_id,
+                "javax.faces.partial.render": dt_id,
+                f"{dt_id}_scrolling": "true",
+                f"{dt_id}_skipChildren": "true",
+                f"{dt_id}_scrollOffset": str(first),
+                f"{dt_id}_scrollRows": str(rows_per_page),
+                f"{dt_id}_encodeFeature": "true",
+                "masterLayout_formlogin": "masterLayout_formlogin",
+                "javax.faces.ViewState": self.viewstate,
+            }
+        else:
+            # Standard paginated DataTable
+            data = {
+                "javax.faces.partial.ajax": "true",
+                "javax.faces.source": dt_id,
+                "javax.faces.partial.execute": dt_id,
+                "javax.faces.partial.render": dt_id,
+                "javax.faces.behavior.event": "page",
+                "javax.faces.partial.event": "page",
+                f"{dt_id}_pagination": "true",
+                f"{dt_id}_first": str(first),
+                f"{dt_id}_rows": str(rows_per_page),
+                f"{dt_id}_skipChildren": "true",
+                f"{dt_id}_encodeFeature": "true",
+                "masterLayout_formlogin": "masterLayout_formlogin",
+                "javax.faces.ViewState": self.viewstate,
+            }
 
         r = self.session.post(self.form_url, data=data, timeout=self.timeout, headers={
             "Faces-Request": "partial/ajax",
@@ -544,12 +597,11 @@ class VahanHttpScraper:
         return r.text
 
     def _fetch_all_datatable_rows(self, response_html, first_page_records):
-        """Fetch all rows from a paginated PrimeFaces DataTable.
+        """Fetch all rows from a paginated/scrollable PrimeFaces DataTable.
 
-        Tries multiple strategies to handle Vahan portal pagination:
-        1. Request all rows at once (rows=500) — fast if the server allows it.
-        2. Page through incrementally — reliable fallback.
-        3. Brute-force: try all candidate IDs if primary detection fails.
+        Detects whether the DataTable is scrollable or standard-paginated
+        from the PrimeFaces widget config, then uses the appropriate AJAX
+        mechanism to fetch all remaining rows.
 
         Saves debug HTML to debug/ folder for inspection.
         If pagination fails entirely, returns first_page_records unchanged.
@@ -581,109 +633,94 @@ class VahanHttpScraper:
         if first_page_row_count <= 2:
             return first_page_records
 
-        # ── Find DataTable ID ──
+        # ── Parse DataTable widget config ──
+        dt_config = self._parse_datatable_config(response_html)
         dt_id = self._find_datatable_id(response_html)
 
-        # If primary detection failed, try brute-force with AJAX <update> IDs
-        if not dt_id:
-            logger.info("Primary DataTable ID detection failed — trying brute-force")
-            candidate_ids = []
-            for umatch in re.finditer(r'<update\s+id="([^"]+)"', response_html):
-                uid = umatch.group(1)
-                if 'ViewState' not in uid and 'viewstate' not in uid.lower():
-                    candidate_ids.append(uid)
-            logger.info(f"Brute-force candidates from <update> tags: {candidate_ids}")
-
-            for uid in candidate_ids:
-                try:
-                    test_html = self._fetch_datatable_page(uid, 0, 100)
-                    test_records = self._extract_table(test_html, saved_headers)
-                    test_oems = len(set(r["oem_raw"] for r in test_records)) if test_records else 0
-                    logger.info(f"  Candidate '{uid}': {len(test_records)} records, {test_oems} OEMs")
-                    if test_oems > first_page_oems:
-                        dt_id = uid
-                        logger.info(f"  Brute-force SUCCESS: '{uid}' yields more OEMs!")
-                        break
-                    elif test_records:
-                        # Even if same count, this ID works — save as fallback
-                        if not dt_id:
-                            dt_id = uid
-                except Exception as e:
-                    logger.debug(f"  Candidate '{uid}' failed: {e}")
+        if dt_config:
+            dt_id = dt_config["dt_id"]
+            rows_per_page = dt_config["rows_per_page"]
+            total_rows = dt_config["row_count"]
+            scrollable = dt_config["scrollable"]
+            logger.info(f"DataTable: id='{dt_id}', scrollable={scrollable}, "
+                        f"rows_per_page={rows_per_page}, total={total_rows}")
+        else:
+            rows_per_page = first_page_row_count
+            total_rows = 0
+            scrollable = False
+            logger.info(f"No widget config found — using detected id='{dt_id}', "
+                        f"rows_per_page={rows_per_page}")
 
         if not dt_id:
-            logger.warning("No DataTable ID found after all strategies — returning first page only")
+            logger.warning("No DataTable ID found — returning first page only")
             return first_page_records
 
-        logger.info(f"Using DataTable ID: '{dt_id}'")
-
-        # ── Strategy 1: Request ALL rows at once (rows=500) ──
-        try:
-            logger.info(f"Strategy 1: Requesting all rows at once (first=0, rows=500)")
-            all_html = self._fetch_datatable_page(dt_id, 0, 500)
-
-            # Save pagination debug HTML too
-            try:
-                debug_pag_path = os.path.join(debug_dir, 'last_pagination_response.html')
-                with open(debug_pag_path, 'w', encoding='utf-8', errors='replace') as f:
-                    f.write(all_html)
-            except Exception:
-                pass
-
-            all_records = self._extract_table(all_html, saved_headers)
-            all_oems = len(set(r["oem_raw"] for r in all_records)) if all_records else 0
-            logger.info(f"Strategy 1 result: {len(all_records)} records, {all_oems} unique OEMs")
-
-            if all_oems > first_page_oems:
-                logger.info(f"Strategy 1 SUCCESS: got {all_oems} OEMs "
-                            f"(vs {first_page_oems} on first page)")
-                return all_records
-            else:
-                logger.info("Strategy 1: no additional OEMs — server may cap page size")
-        except Exception as e:
-            logger.warning(f"Strategy 1 failed: {e}")
-
-        # ── Strategy 2: Page through one page at a time ──
-        logger.info(f"Strategy 2: Paginating page by page "
-                    f"(rows_per_page={first_page_row_count})")
+        # ── Fetch remaining rows via scroll (for scrollable) or page ──
         all_records = list(first_page_records)
         seen_oems = set(r["oem_raw"] for r in all_records)
-        rows_per_page = first_page_row_count
 
-        for page_num in range(2, 50):  # Safety limit: max 50 pages
-            first = (page_num - 1) * rows_per_page
+        # Calculate how many more batches we need
+        if total_rows > 0:
+            remaining = total_rows - first_page_row_count
+            batches_needed = (remaining + rows_per_page - 1) // rows_per_page
+        else:
+            batches_needed = 49  # Safety limit
+
+        logger.info(f"Fetching up to {batches_needed} more batches "
+                    f"({'scroll' if scrollable else 'page'} mode)")
+
+        for batch in range(batches_needed):
+            offset = first_page_row_count + (batch * rows_per_page)
+
+            # If we know total, stop when we've reached it
+            if total_rows > 0 and offset >= total_rows:
+                logger.info(f"Reached total row count ({total_rows}) — stopping")
+                break
+
             try:
-                time.sleep(0.5)
-                page_html = self._fetch_datatable_page(dt_id, first, rows_per_page)
+                time.sleep(0.3)
+                page_html = self._fetch_datatable_page(
+                    dt_id, offset, rows_per_page, scrollable=scrollable
+                )
+
+                # Save first pagination response for debugging
+                if batch == 0:
+                    try:
+                        pag_path = os.path.join(debug_dir, 'last_pagination_response.html')
+                        with open(pag_path, 'w', encoding='utf-8', errors='replace') as f:
+                            f.write(page_html)
+                    except Exception:
+                        pass
+
                 page_records = self._extract_table(page_html, saved_headers)
 
                 if not page_records:
-                    logger.info(f"Page {page_num}: empty — reached end of data")
+                    logger.info(f"Batch {batch + 2}: empty — reached end of data")
                     break
 
-                # Check if we're getting duplicate data (server looping back)
+                # Check for duplicate OEMs (server looping back)
                 new_oems = set(r["oem_raw"] for r in page_records) - seen_oems
-                if not new_oems and page_num > 2:
-                    logger.info(f"Page {page_num}: all OEMs already seen — stopping")
+                if not new_oems and batch > 1:
+                    logger.info(f"Batch {batch + 2}: all OEMs already seen — stopping")
                     break
 
                 all_records.extend(page_records)
                 seen_oems.update(r["oem_raw"] for r in page_records)
-                logger.info(f"Page {page_num}: +{len(page_records)} records, "
-                            f"+{len(new_oems)} new OEMs (total: {len(all_records)} records, "
-                            f"{len(seen_oems)} OEMs)")
+                logger.info(f"Batch {batch + 2} (offset={offset}): "
+                            f"+{len(page_records)} records, +{len(new_oems)} new OEMs "
+                            f"(total: {len(all_records)} records, {len(seen_oems)} OEMs)")
 
             except Exception as e:
-                logger.warning(f"Page {page_num} failed: {e}")
+                logger.warning(f"Batch {batch + 2} (offset={offset}) failed: {e}")
                 break
 
         total_oems = len(seen_oems)
         if total_oems > first_page_oems:
-            logger.info(f"Strategy 2 SUCCESS: {total_oems} OEMs across "
+            logger.info(f"Pagination SUCCESS: {total_oems} OEMs across "
                         f"{len(all_records)} records (vs {first_page_oems} on first page)")
         else:
-            logger.warning(f"Strategy 2: no additional OEMs found — pagination may not work "
-                           f"with this DataTable ID. Check debug/last_pagination_response.html")
+            logger.warning(f"Pagination: no additional OEMs found. "
+                           f"Check debug/last_pagination_response.html")
 
         return all_records
 
@@ -717,10 +754,16 @@ class VahanHttpScraper:
             table_match = re.search(r'<table[^>]*>(.*?</tbody>)', search_text, re.DOTALL)
 
         if not table_match:
-            logger.warning("No data table found in response")
-            return results
-
-        table_html = table_match.group(1)
+            # Scroll/pagination responses may return rows without <table> wrapper
+            # (e.g., just <tbody> or raw <tr> elements in CDATA)
+            if '<tbody' in search_text or '<tr' in search_text:
+                table_html = search_text
+                logger.debug("No <table> found — using raw CDATA for row extraction")
+            else:
+                logger.warning("No data table found in response")
+                return results
+        else:
+            table_html = table_match.group(1)
 
         # Extract headers
         headers = []
