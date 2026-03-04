@@ -438,6 +438,15 @@ class VahanHttpScraper:
             headers = re.findall(r'<(?:th|span)[^>]*>([^<]*)</(?:th|span)>', thead_match.group(1))
             headers = [h.strip() for h in headers if h.strip()]
 
+        # Detect serial number column (S.No) — Vahan portal tables often
+        # have a serial number as the first column before the Maker column.
+        sno_offset = 0
+        if headers:
+            h0 = headers[0].lower().strip().replace('.', '').replace(' ', '')
+            if h0 in ('sno', 'srno', 'slno', '#', 'serial', 'serialno', 'srn', 'no'):
+                sno_offset = 1
+                logger.debug(f"Detected serial number column '{headers[0]}', skipping it")
+
         # Extract data rows
         tbody_match = re.search(r'<tbody[^>]*>(.*?)</tbody>', table_html, re.DOTALL)
         if not tbody_match:
@@ -449,21 +458,37 @@ class VahanHttpScraper:
             if not cells:
                 continue
 
-            # First cell is OEM name (strip HTML tags)
-            oem_raw = re.sub(r'<[^>]+>', '', cells[0]).strip()
+            # Determine OEM name cell index.
+            # If S.No column detected via header, use offset.
+            # Fallback: if cells[0] is purely numeric (serial number), skip it.
+            oem_idx = sno_offset
+            if oem_idx == 0:
+                cell0_text = re.sub(r'<[^>]+>', '', cells[0]).strip()
+                if cell0_text.isdigit() and len(cells) > 2:
+                    oem_idx = 1
+
+            if oem_idx >= len(cells):
+                continue
+
+            oem_raw = re.sub(r'<[^>]+>', '', cells[oem_idx]).strip()
             if not oem_raw or oem_raw.upper() in ("TOTAL", "GRAND TOTAL"):
                 continue
 
-            # Remaining cells are monthly volumes
-            for i, cell in enumerate(cells[1:], 1):
-                if i < len(headers):
+            # Volume cells start after OEM name cell
+            vol_start = oem_idx + 1
+            # Month headers start at same offset as volume cells
+            month_header_start = oem_idx + 1
+
+            for i, cell in enumerate(cells[vol_start:]):
+                header_idx = month_header_start + i
+                if header_idx < len(headers):
                     vol_text = re.sub(r'<[^>]+>', '', cell).strip().replace(",", "")
                     try:
                         volume = int(float(vol_text))
                         if volume > 0:
                             results.append({
                                 "oem_raw": oem_raw,
-                                "month_label": headers[i],
+                                "month_label": headers[header_idx],
                                 "volume": volume,
                             })
                     except (ValueError, IndexError):

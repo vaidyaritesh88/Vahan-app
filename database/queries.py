@@ -1081,3 +1081,60 @@ def get_top_oems_for_category(category_code, year, month, top_n=5):
         ORDER BY volume DESC LIMIT ?
     """, [category_code, year, month, top_n])
     return df["oem_name"].tolist()
+
+
+# ──────────────────────────────────────────────
+# DATA CLEANUP & AGGREGATION
+# ──────────────────────────────────────────────
+
+def cleanup_corrupt_state_data():
+    """Delete state_monthly rows where oem_name is a serial number (pure digits).
+
+    This fixes data from a parser bug where the Vahan portal's S.No column
+    was mistakenly stored as the OEM name.
+
+    Returns number of deleted rows.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        DELETE FROM state_monthly
+        WHERE oem_name GLOB '[0-9]*'
+          AND LENGTH(oem_name) <= 4
+          AND CAST(oem_name AS INTEGER) > 0
+    """)
+    deleted = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return deleted
+
+
+def aggregate_state_to_national():
+    """Aggregate state_monthly data into national_monthly totals.
+
+    Sums all state volumes for each (category, OEM, year, month) combination
+    and upserts into national_monthly with source='vahan_scrape'.
+
+    Preserves existing Excel-sourced rows — only inserts new rows or updates
+    rows that were previously sourced from scraping.
+
+    Returns number of rows upserted.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO national_monthly (category_code, oem_name, year, month, volume, source)
+        SELECT category_code, oem_name, year, month, SUM(volume), 'vahan_scrape'
+        FROM state_monthly
+        WHERE volume > 0
+        GROUP BY category_code, oem_name, year, month
+        ON CONFLICT(category_code, oem_name, year, month)
+        DO UPDATE SET volume = excluded.volume,
+                      source = excluded.source,
+                      updated_at = CURRENT_TIMESTAMP
+        WHERE national_monthly.source != 'excel'
+    """)
+    rows = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return rows

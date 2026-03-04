@@ -10,6 +10,7 @@ from database.schema import init_db
 from database.queries import (
     get_data_freshness, get_load_history, get_record_counts,
     get_scrape_log_summary, get_state_data_freshness,
+    cleanup_corrupt_state_data, aggregate_state_to_national,
 )
 from components.formatters import format_month, format_units
 from config.settings import DATA_DIR, ALL_STATES, VAHAN_SCRAPE_CONFIGS
@@ -226,6 +227,13 @@ with tab2:
                     f"{success_count} succeeded, {fail_count} failed, "
                     f"{total_rows:,} total records upserted."
                 )
+
+                # Auto-aggregate state data into national totals
+                if success_count > 0:
+                    with st.spinner("Aggregating state data → national totals..."):
+                        agg_rows = aggregate_state_to_national()
+                        st.success(f"Aggregated state data → {agg_rows:,} national records updated/inserted.")
+
                 if fail_count > 0:
                     st.info("Failed jobs can be retried by running the scraper again with the same settings.")
                 st.rerun()
@@ -333,3 +341,37 @@ with tab3:
         st.dataframe(history, use_container_width=True, hide_index=True)
     else:
         st.info("No data loads recorded yet.")
+
+    st.divider()
+
+    # ── Data Maintenance Tools ──
+    st.markdown("### Data Maintenance")
+
+    col_clean, col_agg = st.columns(2)
+
+    with col_clean:
+        st.markdown("**Clean Corrupt Scrape Data**")
+        st.caption(
+            "Removes state_monthly rows where OEM name is a serial number "
+            "(1, 2, 3...) — caused by an earlier parser bug."
+        )
+        if st.button("Clean Corrupt Data", key="btn_cleanup"):
+            with st.spinner("Cleaning corrupt rows..."):
+                deleted = cleanup_corrupt_state_data()
+                if deleted > 0:
+                    st.success(f"Deleted {deleted:,} corrupt rows from state_monthly.")
+                else:
+                    st.info("No corrupt rows found — data is clean.")
+                st.rerun()
+
+    with col_agg:
+        st.markdown("**Re-aggregate State → National**")
+        st.caption(
+            "Sums state-level volumes and upserts into national totals. "
+            "Preserves Excel-sourced data; only updates scrape-sourced rows."
+        )
+        if st.button("Re-aggregate Now", key="btn_reaggregate"):
+            with st.spinner("Aggregating state → national..."):
+                agg_rows = aggregate_state_to_national()
+                st.success(f"Aggregated {agg_rows:,} rows into national_monthly.")
+                st.rerun()
