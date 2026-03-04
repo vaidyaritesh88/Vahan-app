@@ -405,6 +405,127 @@ class VahanHttpScraper:
         """Check if the response contains a data table with results."""
         return "<tbody" in html and ("<td" in html)
 
+    def _detect_datatable_pagination(self, html):
+        """Detect PrimeFaces DataTable ID and pagination info from response HTML.
+
+        Returns (datatable_id, rows_per_page, total_rows) or (None, 0, 0) if
+        no pagination is found.
+        """
+        # Look for DataTable widget ID in CDATA blocks or raw HTML
+        search_text = html
+        cdata_blocks = re.findall(r'<!\[CDATA\[(.*?)\]\]>', html, re.DOTALL)
+        if cdata_blocks:
+            search_text = " ".join(cdata_blocks)
+
+        # Find the datatable container div: <div id="XYZ" class="...ui-datatable...">
+        dt_match = re.search(
+            r'<div[^>]*id="([^"]*)"[^>]*class="[^"]*ui-datatable[^"]*"',
+            search_text,
+        )
+        if not dt_match:
+            return None, 0, 0
+
+        dt_id = dt_match.group(1)
+
+        # Look for paginator info.
+        # PrimeFaces paginator renders something like:
+        # <span class="ui-paginator-current">(1 of 10)</span>
+        # or shows page links: <a class="ui-paginator-page ...">1</a> ... <a>10</a>
+        # or has rows-per-page dropdown with total row count in the widget config.
+
+        # Method 1: Look for "({current} of {total})" pattern in paginator
+        page_match = re.search(
+            r'ui-paginator-current[^>]*>\s*\(?\s*(\d+)\s+of\s+(\d+)\s*\)?',
+            search_text,
+        )
+        if page_match:
+            current_page = int(page_match.group(1))
+            total_pages = int(page_match.group(2))
+            # Try to find rows per page from the paginator dropdown or default
+            rpp_match = re.search(
+                r'<option[^>]*selected[^>]*>(\d+)</option>',
+                search_text,
+            )
+            rows_per_page = int(rpp_match.group(1)) if rpp_match else 25
+            total_rows = total_pages * rows_per_page
+            logger.info(f"DataTable '{dt_id}': page {current_page}/{total_pages}, "
+                        f"{rows_per_page} rows/page, ~{total_rows} total rows")
+            return dt_id, rows_per_page, total_rows
+
+        # Method 2: Count page link buttons to determine total pages
+        page_links = re.findall(
+            r'<(?:a|span)[^>]*class="[^"]*ui-paginator-page[^"]*"[^>]*>(\d+)',
+            search_text,
+        )
+        if page_links:
+            total_pages = max(int(p) for p in page_links)
+            # Count rows in the current tbody to determine rows per page
+            tbody_match = re.search(r'<tbody[^>]*>(.*?)</tbody>', search_text, re.DOTALL)
+            if tbody_match:
+                current_rows = len(re.findall(r'<tr[^>]*>', tbody_match.group(1)))
+                rows_per_page = current_rows if current_rows > 0 else 25
+            else:
+                rows_per_page = 25
+            total_rows = total_pages * rows_per_page
+            logger.info(f"DataTable '{dt_id}': {total_pages} pages, "
+                        f"{rows_per_page} rows/page, ~{total_rows} total rows")
+            return dt_id, rows_per_page, total_rows
+
+        # Method 3: Check if paginator div exists at all
+        has_paginator = bool(re.search(
+            r'ui-paginator', search_text,
+        ))
+        if has_paginator:
+            # Paginator exists but we couldn't parse details — assume multi-page
+            tbody_match = re.search(r'<tbody[^>]*>(.*?)</tbody>', search_text, re.DOTALL)
+            if tbody_match:
+                current_rows = len(re.findall(r'<tr[^>]*>', tbody_match.group(1)))
+                rows_per_page = current_rows if current_rows > 0 else 25
+            else:
+                rows_per_page = 25
+            # We don't know total — will paginate until empty
+            logger.info(f"DataTable '{dt_id}': paginator detected, {rows_per_page} rows/page, total unknown")
+            return dt_id, rows_per_page, -1  # -1 = unknown total
+
+        return None, 0, 0
+
+    def _fetch_datatable_page(self, dt_id, first, rows_per_page):
+        """Fetch a specific page of a PrimeFaces DataTable via AJAX pagination.
+
+        Args:
+            dt_id: DataTable widget ID (e.g., 'groupingTable')
+            first: 0-based row offset (0 for page 1, rows_per_page for page 2, etc.)
+            rows_per_page: Number of rows per page
+
+        Returns:
+            Response HTML text.
+        """
+        data = {
+            "javax.faces.partial.ajax": "true",
+            "javax.faces.source": dt_id,
+            "javax.faces.partial.execute": dt_id,
+            "javax.faces.partial.render": dt_id,
+            "javax.faces.behavior.event": "page",
+            "javax.faces.partial.event": "page",
+            f"{dt_id}_pagination": "true",
+            f"{dt_id}_first": str(first),
+            f"{dt_id}_rows": str(rows_per_page),
+            "masterLayout_formlogin": "masterLayout_formlogin",
+            "javax.faces.ViewState": self.viewstate,
+        }
+
+        r = self.session.post(self.form_url, data=data, timeout=self.timeout, headers={
+            "Faces-Request": "partial/ajax",
+            "X-Requested-With": "XMLHttpRequest",
+        })
+        r.raise_for_status()
+
+        new_vs = self._extract_viewstate(r.text)
+        if new_vs:
+            self.viewstate = new_vs
+
+        return r.text
+
     def _extract_table(self, html):
         """Parse the Maker x Month data table from AJAX response HTML.
 
@@ -499,6 +620,8 @@ class VahanHttpScraper:
     def scrape_state_year(self, category_code, state_name, year):
         """Scrape one category for one state for one year.
 
+        Handles paginated DataTable results by fetching all pages.
+
         Returns list of parsed records (not yet stored).
         """
         config = VAHAN_SCRAPE_CONFIGS.get(category_code)
@@ -519,13 +642,51 @@ class VahanHttpScraper:
         # Set all filters
         self._set_filters(state_code, year, config)
 
-        # Click refresh and get data
+        # Click refresh and get first page of data
         response_html = self._find_and_click_refresh(state_code, year, config)
 
-        # Parse the data table
-        records = self._extract_table(response_html)
-        logger.info(f"Parsed {len(records)} records for {category_code}/{state_name}/{year}")
-        return records
+        # Parse the first page
+        all_records = self._extract_table(response_html)
+
+        # Check for pagination — the Vahan DataTable may have multiple pages
+        dt_id, rows_per_page, total_rows = self._detect_datatable_pagination(response_html)
+
+        if dt_id and rows_per_page > 0:
+            # Fetch remaining pages
+            max_pages = 50  # Safety limit
+            page_num = 2
+            first = rows_per_page  # Start of second page
+
+            while page_num <= max_pages:
+                # If we know the total, check if we've fetched enough
+                if total_rows > 0 and first >= total_rows:
+                    break
+
+                try:
+                    time.sleep(0.5)  # Brief delay between page requests
+                    page_html = self._fetch_datatable_page(dt_id, first, rows_per_page)
+                    page_records = self._extract_table(page_html)
+
+                    if not page_records:
+                        # No more data — we've reached the end
+                        break
+
+                    all_records.extend(page_records)
+                    logger.info(f"Page {page_num}: {len(page_records)} records "
+                                f"(total so far: {len(all_records)})")
+
+                    first += rows_per_page
+                    page_num += 1
+
+                except Exception as e:
+                    logger.warning(f"Pagination page {page_num} failed: {e}")
+                    break
+
+            logger.info(f"Fetched {page_num - 1} pages total for "
+                        f"{category_code}/{state_name}/{year}")
+
+        logger.info(f"Parsed {len(all_records)} records for {category_code}/{state_name}/{year}")
+        return all_records
 
     def scrape_and_store(self, category_code, state_name, year):
         """Scrape and store data with logging. Returns number of rows upserted."""
