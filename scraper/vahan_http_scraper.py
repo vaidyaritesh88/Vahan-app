@@ -193,15 +193,33 @@ class VahanHttpScraper:
                 break
 
     def _extract_viewstate(self, text):
-        """Extract javax.faces.ViewState from HTML or AJAX response."""
-        # From HTML form
+        """Extract javax.faces.ViewState from HTML or AJAX response.
+
+        JSF ViewState can appear in multiple formats:
+        1. HTML form: <input name="javax.faces.ViewState" value="...">
+        2. AJAX update: <update id="j_id1:javax.faces.ViewState:0"><![CDATA[...]]>
+           The update ID varies — it may include a naming container prefix
+           (e.g., 'j_id1:') and a state index suffix (':0').
+        """
+        # From HTML form input (initial page load)
         m = re.search(r'name="javax\.faces\.ViewState"[^>]*value="([^"]+)"', text)
         if m:
             return m.group(1)
-        # From AJAX partial response
-        m = re.search(r'<update id="javax\.faces\.ViewState"><!\[CDATA\[([^\]]+)\]\]>', text)
+        # Also try value-before-name ordering
+        m = re.search(r'value="([^"]+)"[^>]*name="javax\.faces\.ViewState"', text)
         if m:
             return m.group(1)
+        # From AJAX partial response — flexible ID matching
+        # Matches: "javax.faces.ViewState", "j_id1:javax.faces.ViewState:0", etc.
+        m = re.search(
+            r'<update\s+id="([^"]*javax\.faces\.ViewState[^"]*)"[^>]*>'
+            r'<!\[CDATA\[([^\]]+)\]\]>',
+            text,
+        )
+        if m:
+            logger.debug(f"ViewState extracted from AJAX update id=\"{m.group(1)}\" "
+                         f"(len={len(m.group(2))})")
+            return m.group(2)
         return None
 
     def _ajax_post(self, source, execute, render, extra_params=None):
@@ -226,9 +244,15 @@ class VahanHttpScraper:
         r.raise_for_status()
 
         # Update ViewState from response
+        old_vs_len = len(self.viewstate) if self.viewstate else 0
         new_vs = self._extract_viewstate(r.text)
         if new_vs:
             self.viewstate = new_vs
+            logger.debug(f"_ajax_post({source}): ViewState updated "
+                         f"({old_vs_len} → {len(new_vs)} chars)")
+        else:
+            logger.debug(f"_ajax_post({source}): no ViewState in response "
+                         f"(keeping existing {old_vs_len} chars)")
 
         return r.text
 
@@ -252,9 +276,15 @@ class VahanHttpScraper:
         })
         r.raise_for_status()
 
+        old_vs_len = len(self.viewstate) if self.viewstate else 0
         new_vs = self._extract_viewstate(r.text)
         if new_vs:
             self.viewstate = new_vs
+            logger.info(f"_button_post({button_id}): ViewState updated "
+                        f"({old_vs_len} → {len(new_vs)} chars)")
+        else:
+            logger.warning(f"_button_post({button_id}): NO ViewState in response! "
+                           f"(keeping stale {old_vs_len} chars)")
 
         return r.text
 
@@ -515,6 +545,33 @@ class VahanHttpScraper:
         ):
             fields.setdefault(m.group(1), m.group(2))
 
+        # 4. Checked checkboxes (PrimeFaces selectCheckboxMenu etc.)
+        #    Only picks up checkboxes that have 'checked' in their HTML attributes.
+        #    PrimeFaces often manages selection state via JS, so many won't be
+        #    detected here — those are preserved in the ViewState instead.
+        for m in re.finditer(
+            r'<input[^>]*type="checkbox"[^>]*checked[^>]*/?\s*>',
+            form_content, re.IGNORECASE,
+        ):
+            tag = m.group(0)
+            nm = re.search(r'name="([^"]*)"', tag)
+            vl = re.search(r'value="([^"]*)"', tag)
+            if nm and vl:
+                name, value = nm.group(1), vl.group(1)
+                # Checkbox groups can have multiple values — keep first seen
+                fields.setdefault(name, value)
+
+        # 5. Checked radio buttons
+        for m in re.finditer(
+            r'<input[^>]*type="radio"[^>]*checked[^>]*/?\s*>',
+            form_content, re.IGNORECASE,
+        ):
+            tag = m.group(0)
+            nm = re.search(r'name="([^"]*)"', tag)
+            vl = re.search(r'value="([^"]*)"', tag)
+            if nm and vl:
+                fields.setdefault(nm.group(1), vl.group(1))
+
         logger.info(f"Extracted {len(fields)} form fields for pagination: "
                     f"{list(fields.keys())[:15]}...")
         return fields
@@ -743,7 +800,8 @@ class VahanHttpScraper:
 
         logger.info(f"Pagination request: mode={mode}, dt_id={dt_id}, "
                     f"first={first}, rows={rows_per_page}, "
-                    f"total_params={len(data)}")
+                    f"total_params={len(data)}, "
+                    f"viewstate_len={len(self.viewstate) if self.viewstate else 0}")
 
         r = self.session.post(self.form_url, data=data, timeout=self.timeout, headers={
             "Faces-Request": "partial/ajax",
@@ -751,9 +809,21 @@ class VahanHttpScraper:
         })
         r.raise_for_status()
 
+        # Check what the response contains
+        has_tbody = "<tbody" in r.text and "<td" in r.text
+        has_update = "<update" in r.text
+        old_vs_len = len(self.viewstate) if self.viewstate else 0
+
         new_vs = self._extract_viewstate(r.text)
         if new_vs:
             self.viewstate = new_vs
+            logger.info(f"Pagination response: {len(r.text)} chars, "
+                        f"has_data={has_tbody}, has_update={has_update}, "
+                        f"ViewState updated ({old_vs_len} → {len(new_vs)})")
+        else:
+            logger.warning(f"Pagination response: {len(r.text)} chars, "
+                           f"has_data={has_tbody}, has_update={has_update}, "
+                           f"NO ViewState in response!")
 
         return r.text
 
