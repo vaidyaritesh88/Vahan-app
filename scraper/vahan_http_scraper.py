@@ -512,47 +512,77 @@ class VahanHttpScraper:
         - rows_per_page: rows per page from paginator config
         - row_count: total row count
         - scrollable: whether it's a scrollable DataTable
+        - live_scroll: whether lazy loading via scroll is enabled
 
-        Returns dict with keys: dt_id, rows_per_page, row_count, scrollable
+        Returns dict with config keys, or None if not found.
         """
-        m = re.search(
-            r'PrimeFaces\.cw\("DataTable","([^"]+)",\{id:"([^"]+)"'
-            r'(?:.*?rows:(\d+))?'
-            r'(?:.*?rowCount:(\d+))?'
-            r'(?:.*?scrollable:(true|false))?'
-            r'(?:.*?scrollLimit:(\d+))?',
-            html
-        )
-        if m:
-            config = {
-                "widget_var": m.group(1),
-                "dt_id": m.group(2),
-                "rows_per_page": int(m.group(3)) if m.group(3) else 25,
-                "row_count": int(m.group(4)) if m.group(4) else 0,
-                "scrollable": m.group(5) == "true" if m.group(5) else False,
-                "scroll_limit": int(m.group(6)) if m.group(6) else 0,
-            }
-            logger.info(f"DataTable config: {config}")
-            return config
-        return None
+        # Find the full config string first
+        start = html.find('PrimeFaces.cw("DataTable"')
+        if start < 0:
+            return None
 
-    def _fetch_datatable_page(self, dt_id, first, rows_per_page, scrollable=False):
+        # Extract the full config block (up to closing parenthesis)
+        depth = 0
+        end = start
+        for i in range(start, min(start + 2000, len(html))):
+            if html[i] == '(':
+                depth += 1
+            elif html[i] == ')':
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+
+        config_str = html[start:end]
+        logger.info(f"Raw DataTable config: {config_str[:300]}...")
+
+        # Parse individual fields
+        widget_var = re.search(r'PrimeFaces\.cw\("DataTable","([^"]+)"', config_str)
+        dt_id = re.search(r'id:"([^"]+)"', config_str)
+        rows = re.search(r'rows:(\d+)', config_str)
+        row_count = re.search(r'rowCount:(\d+)', config_str)
+        scrollable = re.search(r'scrollable:(true|false)', config_str)
+        live_scroll = re.search(r'liveScroll:(true|false)', config_str)
+        scroll_limit = re.search(r'scrollLimit:(\d+)', config_str)
+
+        if not dt_id:
+            return None
+
+        config = {
+            "widget_var": widget_var.group(1) if widget_var else "",
+            "dt_id": dt_id.group(1),
+            "rows_per_page": int(rows.group(1)) if rows else 25,
+            "row_count": int(row_count.group(1)) if row_count else 0,
+            "scrollable": scrollable.group(1) == "true" if scrollable else False,
+            "live_scroll": live_scroll.group(1) == "true" if live_scroll else False,
+            "scroll_limit": int(scroll_limit.group(1)) if scroll_limit else 0,
+        }
+        logger.info(f"DataTable config: {config}")
+        return config
+
+    def _fetch_datatable_page(self, dt_id, first, rows_per_page, mode="pagination"):
         """Fetch a specific page/scroll batch of a PrimeFaces DataTable.
 
-        For scrollable DataTables, uses the scroll-load mechanism.
-        For standard DataTables, uses the page event.
+        PrimeFaces DataTables have multiple navigation modes:
+        - "pagination": Standard paginator without behavior event (most common).
+            This is what PrimeFaces uses when there's NO server-side <p:ajax event="page">
+            listener. The paginator sends a simple AJAX request with pagination params.
+        - "live_scroll": Lazy-loading via scroll events (liveScroll:true).
+            Uses _scrolling/_scrollOffset/_scrollRows params.
+        - "page_event": Paginator WITH a server-side page behavior listener.
+            Adds javax.faces.behavior.event=page (rarely needed).
 
         Args:
             dt_id: DataTable widget ID (e.g., 'groupingTable')
             first: 0-based row offset
             rows_per_page: Number of rows per page/scroll batch
-            scrollable: If True, use scroll-load instead of page event
+            mode: "pagination" (default), "live_scroll", or "page_event"
 
         Returns:
             Response HTML text.
         """
-        if scrollable:
-            # PrimeFaces scrollable DataTable uses a different AJAX format
+        if mode == "live_scroll":
+            # PrimeFaces scrollable DataTable with liveScroll:true
             data = {
                 "javax.faces.partial.ajax": "true",
                 "javax.faces.source": dt_id,
@@ -567,14 +597,14 @@ class VahanHttpScraper:
                 "javax.faces.ViewState": self.viewstate,
             }
         else:
-            # Standard paginated DataTable
+            # Standard pagination — NO behavior event
+            # This matches PrimeFaces.ajax.Request.handle() which is called
+            # when DataTable.paginate() has no server-side page listener.
             data = {
                 "javax.faces.partial.ajax": "true",
                 "javax.faces.source": dt_id,
                 "javax.faces.partial.execute": dt_id,
                 "javax.faces.partial.render": dt_id,
-                "javax.faces.behavior.event": "page",
-                "javax.faces.partial.event": "page",
                 f"{dt_id}_pagination": "true",
                 f"{dt_id}_first": str(first),
                 f"{dt_id}_rows": str(rows_per_page),
@@ -583,6 +613,13 @@ class VahanHttpScraper:
                 "masterLayout_formlogin": "masterLayout_formlogin",
                 "javax.faces.ViewState": self.viewstate,
             }
+            # Only add behavior event for "page_event" mode (rarely needed)
+            if mode == "page_event":
+                data["javax.faces.behavior.event"] = "page"
+                data["javax.faces.partial.event"] = "page"
+
+        logger.info(f"Pagination request: mode={mode}, dt_id={dt_id}, "
+                    f"first={first}, rows={rows_per_page}")
 
         r = self.session.post(self.form_url, data=data, timeout=self.timeout, headers={
             "Faces-Request": "partial/ajax",
@@ -642,14 +679,26 @@ class VahanHttpScraper:
             rows_per_page = dt_config["rows_per_page"]
             total_rows = dt_config["row_count"]
             scrollable = dt_config["scrollable"]
+            live_scroll = dt_config.get("live_scroll", False)
+
+            # Determine pagination mode:
+            # - liveScroll:true → use scroll-load AJAX ("live_scroll")
+            # - otherwise → standard pagination WITHOUT behavior event ("pagination")
+            #   (scrollable:true with liveScroll:false just means fixed header UI)
+            if live_scroll:
+                fetch_mode = "live_scroll"
+            else:
+                fetch_mode = "pagination"
+
             logger.info(f"DataTable: id='{dt_id}', scrollable={scrollable}, "
+                        f"liveScroll={live_scroll}, mode='{fetch_mode}', "
                         f"rows_per_page={rows_per_page}, total={total_rows}")
         else:
             rows_per_page = first_page_row_count
             total_rows = 0
-            scrollable = False
+            fetch_mode = "pagination"
             logger.info(f"No widget config found — using detected id='{dt_id}', "
-                        f"rows_per_page={rows_per_page}")
+                        f"mode='{fetch_mode}', rows_per_page={rows_per_page}")
 
         if not dt_id:
             logger.warning("No DataTable ID found — returning first page only")
@@ -667,7 +716,7 @@ class VahanHttpScraper:
             batches_needed = 49  # Safety limit
 
         logger.info(f"Fetching up to {batches_needed} more batches "
-                    f"({'scroll' if scrollable else 'page'} mode)")
+                    f"(mode='{fetch_mode}')")
 
         for batch in range(batches_needed):
             offset = first_page_row_count + (batch * rows_per_page)
@@ -680,7 +729,7 @@ class VahanHttpScraper:
             try:
                 time.sleep(0.3)
                 page_html = self._fetch_datatable_page(
-                    dt_id, offset, rows_per_page, scrollable=scrollable
+                    dt_id, offset, rows_per_page, mode=fetch_mode
                 )
 
                 # Save first pagination response for debugging
@@ -693,6 +742,27 @@ class VahanHttpScraper:
                         pass
 
                 page_records = self._extract_table(page_html, saved_headers)
+
+                # If first batch returns no data, try fallback modes
+                if not page_records and batch == 0:
+                    if fetch_mode == "pagination":
+                        logger.info("pagination mode returned empty — trying page_event mode")
+                        page_html = self._fetch_datatable_page(
+                            dt_id, offset, rows_per_page, mode="page_event"
+                        )
+                        page_records = self._extract_table(page_html, saved_headers)
+                        if page_records:
+                            fetch_mode = "page_event"
+                            logger.info(f"page_event mode works! Switching to it.")
+                    if not page_records and fetch_mode != "live_scroll":
+                        logger.info("Trying live_scroll mode as last resort")
+                        page_html = self._fetch_datatable_page(
+                            dt_id, offset, rows_per_page, mode="live_scroll"
+                        )
+                        page_records = self._extract_table(page_html, saved_headers)
+                        if page_records:
+                            fetch_mode = "live_scroll"
+                            logger.info(f"live_scroll mode works! Switching to it.")
 
                 if not page_records:
                     logger.info(f"Batch {batch + 2}: empty — reached end of data")
