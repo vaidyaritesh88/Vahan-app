@@ -130,6 +130,11 @@ class VahanHttpScraper:
         self._state_id = None
         self._number_format_id = None
 
+        # Form fields saved from the last refresh click, for use in pagination.
+        # PrimeFaces AJAX serializes the entire form with every request —
+        # pagination requests must include these or the server ignores them.
+        self._last_form_params = {}
+
     @staticmethod
     def _detect_cloud_env():
         """Detect if we're running on Streamlit Cloud or similar."""
@@ -359,6 +364,7 @@ class VahanHttpScraper:
         """Submit the form by finding and clicking the refresh button.
 
         As a fallback, we do a full form POST with all parameters.
+        Also saves form field values for use in subsequent pagination requests.
         """
         # Build form data with all current selections
         form_data = {
@@ -381,6 +387,7 @@ class VahanHttpScraper:
             try:
                 resp = self._button_post(btn_id, form_data)
                 if self._has_data_table(resp):
+                    self._save_form_params(form_data, resp)
                     return resp
             except Exception:
                 continue
@@ -395,15 +402,122 @@ class VahanHttpScraper:
                     form_data["javax.faces.ViewState"] = self._extract_viewstate(r.text) or self.viewstate
                     resp = self._button_post(btn_id, form_data)
                     if self._has_data_table(resp):
+                        self._save_form_params(form_data, resp)
                         return resp
                 except Exception:
                     continue
 
         raise RuntimeError("Could not trigger data refresh — no valid button found")
 
+    def _save_form_params(self, form_data, response_html):
+        """Save form field values for reuse in pagination AJAX requests.
+
+        PrimeFaces AJAX always serializes the entire form. Pagination requests
+        that omit form fields (state, year, filters) will be ignored by the
+        server — it returns only a ViewState update with no table data.
+
+        We merge the explicitly-built form_data with any additional fields
+        discovered in the response HTML (hidden inputs, scroll state, etc.).
+        """
+        # Start with our known form fields
+        self._last_form_params = {
+            k: v for k, v in form_data.items()
+            if k != "javax.faces.ViewState"
+        }
+
+        # Merge in fields extracted from response HTML (hidden inputs,
+        # select values, etc.). These may include additional fields like
+        # groupingTable_scrollState that we didn't explicitly set.
+        response_fields = self._extract_all_form_fields(response_html)
+        for k, v in response_fields.items():
+            if k not in self._last_form_params:
+                self._last_form_params[k] = v
+
+        logger.info(f"Saved {len(self._last_form_params)} form params for pagination")
+
     def _has_data_table(self, html):
         """Check if the response contains a data table with results."""
         return "<tbody" in html and ("<td" in html)
+
+    def _extract_all_form_fields(self, html):
+        """Extract all form field values from the response HTML.
+
+        When the browser makes a PrimeFaces AJAX request, it serializes ALL
+        fields in the enclosing <form> (hidden inputs, selects, text inputs)
+        alongside the AJAX-specific parameters. Without these, the server
+        does not know what filters are active and returns an empty update.
+
+        Returns a dict of field names → values (excluding ViewState).
+        """
+        fields = {}
+
+        # Work on CDATA content if it's an AJAX response, else raw HTML
+        cdata_blocks = re.findall(r'<!\[CDATA\[(.*?)\]\]>', html, re.DOTALL)
+        search_text = " ".join(cdata_blocks) if cdata_blocks else html
+
+        # Try to isolate the form content
+        form_match = re.search(
+            r'<form[^>]*id="masterLayout_formlogin"[^>]*>(.*?)</form>',
+            search_text, re.DOTALL,
+        )
+        form_content = form_match.group(1) if form_match else search_text
+
+        # 1. Hidden inputs: <input type="hidden" name="X" value="Y">
+        #    Handles both attribute orderings
+        for m in re.finditer(
+            r'<input[^>]*type="hidden"[^>]*name="([^"]*)"[^>]*value="([^"]*)"',
+            form_content,
+        ):
+            name, value = m.group(1), m.group(2)
+            if "javax.faces.ViewState" not in name:
+                fields[name] = value
+
+        for m in re.finditer(
+            r'<input[^>]*name="([^"]*)"[^>]*type="hidden"[^>]*value="([^"]*)"',
+            form_content,
+        ):
+            name, value = m.group(1), m.group(2)
+            if "javax.faces.ViewState" not in name:
+                fields.setdefault(name, value)
+
+        for m in re.finditer(
+            r'<input[^>]*value="([^"]*)"[^>]*type="hidden"[^>]*name="([^"]*)"',
+            form_content,
+        ):
+            value, name = m.group(1), m.group(2)
+            if "javax.faces.ViewState" not in name:
+                fields.setdefault(name, value)
+
+        # 2. Select dropdowns: extract the selected option's value
+        for m in re.finditer(
+            r'<select[^>]*name="([^"]*)"[^>]*>(.*?)</select>',
+            form_content, re.DOTALL,
+        ):
+            name = m.group(1)
+            content = m.group(2)
+            sel_opt = re.search(
+                r'<option[^>]*selected[^>]*value="([^"]*)"', content
+            )
+            if sel_opt:
+                fields[name] = sel_opt.group(1)
+            else:
+                # Try reversed attribute order
+                sel_opt = re.search(
+                    r'<option[^>]*value="([^"]*)"[^>]*selected', content
+                )
+                if sel_opt:
+                    fields[name] = sel_opt.group(1)
+
+        # 3. Text inputs
+        for m in re.finditer(
+            r'<input[^>]*type="text"[^>]*name="([^"]*)"[^>]*value="([^"]*)"',
+            form_content,
+        ):
+            fields.setdefault(m.group(1), m.group(2))
+
+        logger.info(f"Extracted {len(fields)} form fields for pagination: "
+                    f"{list(fields.keys())[:15]}...")
+        return fields
 
     def _extract_table_headers(self, html):
         """Extract column headers from a table in the HTML response.
@@ -618,8 +732,18 @@ class VahanHttpScraper:
                 data["javax.faces.behavior.event"] = "page"
                 data["javax.faces.partial.event"] = "page"
 
+        # ── Merge in saved form fields ──
+        # PrimeFaces AJAX serializes the ENTIRE form with every request.
+        # Without the filter fields (state, year, RTO, axes, etc.) the server
+        # has no context and returns only a ViewState update.
+        if self._last_form_params:
+            for k, v in self._last_form_params.items():
+                if k not in data:  # Don't override DataTable-specific params
+                    data[k] = v
+
         logger.info(f"Pagination request: mode={mode}, dt_id={dt_id}, "
-                    f"first={first}, rows={rows_per_page}")
+                    f"first={first}, rows={rows_per_page}, "
+                    f"total_params={len(data)}")
 
         r = self.session.post(self.form_url, data=data, timeout=self.timeout, headers={
             "Faces-Request": "partial/ajax",
