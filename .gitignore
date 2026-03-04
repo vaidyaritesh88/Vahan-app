@@ -32,3 +32,6 @@ chromedriver.exe
 # Temp files
 *.tmp
 *.log
+
+# Debug output
+debug/

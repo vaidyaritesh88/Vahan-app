@@ -405,11 +405,25 @@ class VahanHttpScraper:
         """Check if the response contains a data table with results."""
         return "<tbody" in html and ("<td" in html)
 
+    def _extract_table_headers(self, html):
+        """Extract column headers from a table in the HTML response.
+
+        Used to save headers from the first page for reuse with pagination
+        responses that may not include <thead>.
+        """
+        cdata_blocks = re.findall(r'<!\[CDATA\[(.*?)\]\]>', html, re.DOTALL)
+        search_text = " ".join(cdata_blocks) if cdata_blocks else html
+        thead_match = re.search(r'<thead[^>]*>(.*?)</thead>', search_text, re.DOTALL)
+        if thead_match:
+            headers = re.findall(r'<(?:th|span)[^>]*>([^<]*)</(?:th|span)>', thead_match.group(1))
+            return [h.strip() for h in headers if h.strip()]
+        return []
+
     def _find_datatable_id(self, html):
         """Find the PrimeFaces DataTable widget ID from response HTML.
 
-        Searches both raw HTML and CDATA blocks. Handles HTML attributes in
-        any order (id before class or class before id).
+        Searches both raw HTML and CDATA blocks. Uses 8 strategies with
+        increasing aggressiveness to find the DataTable ID.
 
         Returns the DataTable ID string, or None if not found.
         """
@@ -418,38 +432,65 @@ class VahanHttpScraper:
         if cdata_blocks:
             search_text = " ".join(cdata_blocks)
 
+        # Log what we're searching through for debugging
+        logger.info(f"DataTable ID search: HTML length={len(html)}, "
+                    f"CDATA blocks={len(cdata_blocks)}, "
+                    f"search_text length={len(search_text)}")
+
         # Strategy 1: <div id="X" class="...ui-datatable...">
         m = re.search(r'<div[^>]*id="([^"]*)"[^>]*class="[^"]*ui-datatable[^"]*"', search_text)
         if m:
-            logger.info(f"Found DataTable ID (div id before class): {m.group(1)}")
+            logger.info(f"Found DataTable ID (S1 div id+class): {m.group(1)}")
             return m.group(1)
 
         # Strategy 2: <div class="...ui-datatable..." id="X">  (reversed attr order)
         m = re.search(r'<div[^>]*class="[^"]*ui-datatable[^"]*"[^>]*id="([^"]*)"', search_text)
         if m:
-            logger.info(f"Found DataTable ID (div class before id): {m.group(1)}")
+            logger.info(f"Found DataTable ID (S2 div class+id): {m.group(1)}")
             return m.group(1)
 
         # Strategy 3: Look for <table> with ui-datatable class
         m = re.search(r'<table[^>]*id="([^"]*)"[^>]*class="[^"]*ui-datatable[^"]*"', search_text)
         if m:
-            logger.info(f"Found DataTable ID (table element): {m.group(1)}")
+            logger.info(f"Found DataTable ID (S3 table element): {m.group(1)}")
             return m.group(1)
 
         # Strategy 4: Look for any element with datatable-related id pattern
-        # PrimeFaces datatable IDs often contain 'groupingTable', 'dataTable', or 'j_idt'
         m = re.search(r'id="([^"]*(?:groupingTable|dataTable|datatable)[^"]*)"', search_text, re.IGNORECASE)
         if m:
-            logger.info(f"Found DataTable ID (name pattern): {m.group(1)}")
+            logger.info(f"Found DataTable ID (S4 name pattern): {m.group(1)}")
             return m.group(1)
 
         # Strategy 5: Look for _paginator suffix which implies a DataTable
         m = re.search(r'id="([^"]*?)_paginator', search_text)
         if m:
-            logger.info(f"Found DataTable ID (from paginator): {m.group(1)}")
+            logger.info(f"Found DataTable ID (S5 paginator suffix): {m.group(1)}")
             return m.group(1)
 
-        logger.warning("Could not find DataTable ID in response HTML")
+        # Strategy 6: From AJAX <update id="X"> elements whose CDATA has <tbody>
+        for umatch in re.finditer(r'<update\s+id="([^"]+)"[^>]*><!\[CDATA\[(.*?)\]\]>', html, re.DOTALL):
+            uid = umatch.group(1)
+            ucontent = umatch.group(2)
+            if '<tbody' in ucontent and 'ViewState' not in uid and 'viewstate' not in uid.lower():
+                logger.info(f"Found DataTable ID (S6 AJAX update with tbody): {uid}")
+                return uid
+
+        # Strategy 7: Any id attribute containing "table" (case insensitive)
+        m = re.search(r'id="([^"]*[Tt]able[^"]*)"', search_text)
+        if m and 'ViewState' not in m.group(1):
+            logger.info(f"Found DataTable ID (S7 id containing 'table'): {m.group(1)}")
+            return m.group(1)
+
+        # Strategy 8: Find the id of the first <div> that is a parent of <tbody>
+        m = re.search(r'<div[^>]*id="([^"]*)"[^>]*>[\s\S]{0,2000}<tbody', search_text)
+        if m and 'ViewState' not in m.group(1):
+            logger.info(f"Found DataTable ID (S8 parent div of tbody): {m.group(1)}")
+            return m.group(1)
+
+        # Log all IDs found for debugging
+        all_ids = re.findall(r'id="([^"]{2,60})"', search_text)
+        logger.warning(f"Could not find DataTable ID. All IDs found ({len(all_ids)}): "
+                       f"{all_ids[:20]}")
         return None
 
     def _count_tbody_rows(self, html):
@@ -505,36 +546,97 @@ class VahanHttpScraper:
     def _fetch_all_datatable_rows(self, response_html, first_page_records):
         """Fetch all rows from a paginated PrimeFaces DataTable.
 
-        Tries two strategies:
+        Tries multiple strategies to handle Vahan portal pagination:
         1. Request all rows at once (rows=500) — fast if the server allows it.
         2. Page through incrementally — reliable fallback.
+        3. Brute-force: try all candidate IDs if primary detection fails.
 
+        Saves debug HTML to debug/ folder for inspection.
         If pagination fails entirely, returns first_page_records unchanged.
         """
-        dt_id = self._find_datatable_id(response_html)
-        if not dt_id:
-            logger.info("No DataTable ID found — returning first page data only")
-            return first_page_records
+        import os
+
+        # ── Save debug HTML for inspection ──
+        try:
+            debug_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'debug')
+            os.makedirs(debug_dir, exist_ok=True)
+            debug_path = os.path.join(debug_dir, 'last_scrape_response.html')
+            with open(debug_path, 'w', encoding='utf-8', errors='replace') as f:
+                f.write(response_html)
+            logger.info(f"Debug: saved response HTML ({len(response_html)} chars) "
+                        f"to debug/last_scrape_response.html")
+        except Exception as e:
+            logger.debug(f"Could not save debug HTML: {e}")
+
+        # ── Save headers from first page for reuse with pagination ──
+        saved_headers = self._extract_table_headers(response_html)
+        logger.info(f"First page headers ({len(saved_headers)}): {saved_headers[:8]}...")
 
         first_page_row_count = self._count_tbody_rows(response_html)
         first_page_oems = len(set(r["oem_raw"] for r in first_page_records)) if first_page_records else 0
         logger.info(f"First page: {first_page_row_count} table rows, "
-                    f"{first_page_oems} unique OEMs, DataTable ID: '{dt_id}'")
+                    f"{first_page_oems} unique OEMs, {len(first_page_records)} records")
 
         # If first page has very few rows, it's possibly not paginated
         if first_page_row_count <= 2:
             return first_page_records
 
+        # ── Find DataTable ID ──
+        dt_id = self._find_datatable_id(response_html)
+
+        # If primary detection failed, try brute-force with AJAX <update> IDs
+        if not dt_id:
+            logger.info("Primary DataTable ID detection failed — trying brute-force")
+            candidate_ids = []
+            for umatch in re.finditer(r'<update\s+id="([^"]+)"', response_html):
+                uid = umatch.group(1)
+                if 'ViewState' not in uid and 'viewstate' not in uid.lower():
+                    candidate_ids.append(uid)
+            logger.info(f"Brute-force candidates from <update> tags: {candidate_ids}")
+
+            for uid in candidate_ids:
+                try:
+                    test_html = self._fetch_datatable_page(uid, 0, 100)
+                    test_records = self._extract_table(test_html, saved_headers)
+                    test_oems = len(set(r["oem_raw"] for r in test_records)) if test_records else 0
+                    logger.info(f"  Candidate '{uid}': {len(test_records)} records, {test_oems} OEMs")
+                    if test_oems > first_page_oems:
+                        dt_id = uid
+                        logger.info(f"  Brute-force SUCCESS: '{uid}' yields more OEMs!")
+                        break
+                    elif test_records:
+                        # Even if same count, this ID works — save as fallback
+                        if not dt_id:
+                            dt_id = uid
+                except Exception as e:
+                    logger.debug(f"  Candidate '{uid}' failed: {e}")
+
+        if not dt_id:
+            logger.warning("No DataTable ID found after all strategies — returning first page only")
+            return first_page_records
+
+        logger.info(f"Using DataTable ID: '{dt_id}'")
+
         # ── Strategy 1: Request ALL rows at once (rows=500) ──
         try:
             logger.info(f"Strategy 1: Requesting all rows at once (first=0, rows=500)")
             all_html = self._fetch_datatable_page(dt_id, 0, 500)
-            all_records = self._extract_table(all_html)
+
+            # Save pagination debug HTML too
+            try:
+                debug_pag_path = os.path.join(debug_dir, 'last_pagination_response.html')
+                with open(debug_pag_path, 'w', encoding='utf-8', errors='replace') as f:
+                    f.write(all_html)
+            except Exception:
+                pass
+
+            all_records = self._extract_table(all_html, saved_headers)
             all_oems = len(set(r["oem_raw"] for r in all_records)) if all_records else 0
             logger.info(f"Strategy 1 result: {len(all_records)} records, {all_oems} unique OEMs")
 
             if all_oems > first_page_oems:
-                logger.info(f"Strategy 1 SUCCESS: got {all_oems} OEMs (vs {first_page_oems} on first page)")
+                logger.info(f"Strategy 1 SUCCESS: got {all_oems} OEMs "
+                            f"(vs {first_page_oems} on first page)")
                 return all_records
             else:
                 logger.info("Strategy 1: no additional OEMs — server may cap page size")
@@ -542,7 +644,8 @@ class VahanHttpScraper:
             logger.warning(f"Strategy 1 failed: {e}")
 
         # ── Strategy 2: Page through one page at a time ──
-        logger.info(f"Strategy 2: Paginating page by page (rows_per_page={first_page_row_count})")
+        logger.info(f"Strategy 2: Paginating page by page "
+                    f"(rows_per_page={first_page_row_count})")
         all_records = list(first_page_records)
         seen_oems = set(r["oem_raw"] for r in all_records)
         rows_per_page = first_page_row_count
@@ -552,7 +655,7 @@ class VahanHttpScraper:
             try:
                 time.sleep(0.5)
                 page_html = self._fetch_datatable_page(dt_id, first, rows_per_page)
-                page_records = self._extract_table(page_html)
+                page_records = self._extract_table(page_html, saved_headers)
 
                 if not page_records:
                     logger.info(f"Page {page_num}: empty — reached end of data")
@@ -579,12 +682,18 @@ class VahanHttpScraper:
             logger.info(f"Strategy 2 SUCCESS: {total_oems} OEMs across "
                         f"{len(all_records)} records (vs {first_page_oems} on first page)")
         else:
-            logger.info(f"Strategy 2: no additional OEMs found — table may not be paginated")
+            logger.warning(f"Strategy 2: no additional OEMs found — pagination may not work "
+                           f"with this DataTable ID. Check debug/last_pagination_response.html")
 
         return all_records
 
-    def _extract_table(self, html):
+    def _extract_table(self, html, saved_headers=None):
         """Parse the Maker x Month data table from AJAX response HTML.
+
+        Args:
+            html: Response HTML (full page or AJAX partial response)
+            saved_headers: Optional list of header strings to use if no <thead>
+                           found (useful for pagination responses)
 
         Returns list of dicts: [{oem_raw, month_label, volume}, ...]
         """
@@ -594,7 +703,7 @@ class VahanHttpScraper:
         cdata_blocks = re.findall(r'<!\[CDATA\[(.*?)\]\]>', html, re.DOTALL)
         search_text = " ".join(cdata_blocks) if cdata_blocks else html
 
-        # Find the data table
+        # Find the data table — try multiple patterns
         table_match = re.search(
             r'<table[^>]*class="[^"]*ui-datatable[^"]*"[^>]*>(.*?)</table>',
             search_text, re.DOTALL
@@ -602,6 +711,10 @@ class VahanHttpScraper:
         if not table_match:
             # Try finding any table with thead/tbody
             table_match = re.search(r'<table[^>]*>(.*?<thead.*?</tbody>.*?)</table>', search_text, re.DOTALL)
+
+        if not table_match:
+            # Last resort: find any table that has a <tbody>
+            table_match = re.search(r'<table[^>]*>(.*?</tbody>)', search_text, re.DOTALL)
 
         if not table_match:
             logger.warning("No data table found in response")
@@ -615,6 +728,11 @@ class VahanHttpScraper:
         if thead_match:
             headers = re.findall(r'<(?:th|span)[^>]*>([^<]*)</(?:th|span)>', thead_match.group(1))
             headers = [h.strip() for h in headers if h.strip()]
+
+        # Fallback: use saved_headers from first page if no <thead> found
+        if not headers and saved_headers:
+            headers = saved_headers
+            logger.debug(f"Using saved headers ({len(headers)} columns) for pagination page")
 
         # Detect serial number column (S.No) — Vahan portal tables often
         # have a serial number as the first column before the Maker column.
