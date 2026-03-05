@@ -1050,12 +1050,17 @@ class VahanHttpScraper:
                 sno_offset = 1
                 logger.debug(f"Detected serial number column '{headers[0]}', skipping it")
 
-        # Extract data rows
+        # Extract data rows — try <tbody> first, then raw <tr> elements
+        # (pagination responses return just <tr> rows without a <tbody> wrapper)
         tbody_match = re.search(r'<tbody[^>]*>(.*?)</tbody>', table_html, re.DOTALL)
-        if not tbody_match:
-            return results
+        if tbody_match:
+            row_source = tbody_match.group(1)
+        else:
+            # No <tbody> — use table_html directly (common for pagination pages)
+            row_source = table_html
+            logger.debug("No <tbody> found — extracting <tr> rows directly")
 
-        rows = re.findall(r'<tr[^>]*>(.*?)</tr>', tbody_match.group(1), re.DOTALL)
+        rows = re.findall(r'<tr[^>]*>(.*?)</tr>', row_source, re.DOTALL)
         for row_html in rows:
             cells = re.findall(r'<td[^>]*>(.*?)</td>', row_html, re.DOTALL)
             if not cells:
