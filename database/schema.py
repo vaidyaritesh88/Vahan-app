@@ -7,7 +7,7 @@ from config.settings import DB_PATH, DATA_DIR
 def get_connection():
     """Get a SQLite connection with WAL mode enabled."""
     os.makedirs(DATA_DIR, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.row_factory = sqlite3.Row

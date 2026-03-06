@@ -1,23 +1,34 @@
-"""Page 4: OEM 360 View - Deep-dive into any OEM with growth rates, market share, and powertrain analysis."""
+"""Page 4: OEM 360 View — Analyst-grade deep-dive into any OEM.
+
+Flow:  Snapshot → Sales Trend + YoY → Sub-Category Mix → Market Share → State Analysis
+"""
 import streamlit as st
 import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
 import sys, os
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from database.schema import init_db
 from database.queries import (
     get_oem_all_categories, get_oem_monthly_all, get_oem_with_market_totals,
     get_oem_categories_list, get_subsegments_for_base, get_category_monthly_all,
-    get_oem_volume_trend, get_oem_state_distribution, get_oem_state_share_trend,
-    has_state_data, get_latest_month, get_state_oem_monthly, get_state_category_monthly,
+    get_oem_state_distribution, get_oem_state_share_trend, has_state_data,
+    get_latest_month, get_state_oem_monthly, get_state_category_monthly,
+    get_oem_state_market_shares,
 )
-from components.filters import oem_selector, period_selector, frequency_selector
-from components.formatters import format_units, format_month, format_pct
-from components.charts import horizontal_bar, donut_chart, line_chart, monthly_bar_chart
+from components.filters import oem_selector, period_selector
+from components.formatters import (
+    format_units, format_month, format_pct, OEM_COLORS,
+    get_fy_start_year, get_fy_label,
+)
+from components.charts import (
+    dual_axis_bar_line, line_chart, horizontal_bar, LAYOUT_DEFAULTS,
+)
 from components.analysis import (
-    compute_growth_rates, compute_fytd, compute_fy_volumes,
-    aggregate_by_frequency, filter_by_period, get_period_months,
-    add_fy_columns, compute_growth_series,
+    compute_growth_rates, compute_fytd, compute_growth_series,
+    add_fy_columns, filter_by_period, get_period_months, _pct_change,
 )
 
 init_db()
@@ -26,10 +37,10 @@ st.set_page_config(page_title="OEM 360", page_icon="🏢", layout="wide")
 st.title("OEM 360 View")
 
 
-# ── Helper ──
-
+# ──────────────────────────────────────
+# HELPER: safe growth
+# ──────────────────────────────────────
 def _safe_growth(current, previous):
-    """Compute YoY/growth % safely."""
     if current is None or previous is None:
         return None
     if pd.isna(current) or pd.isna(previous) or previous <= 0:
@@ -37,7 +48,9 @@ def _safe_growth(current, previous):
     return round(((current / previous) - 1) * 100, 1)
 
 
-# ── Sidebar Filters ──
+# ──────────────────────────────────────
+# SIDEBAR
+# ──────────────────────────────────────
 oem = oem_selector(key="oem360")
 preset, ref_year, ref_month = period_selector(key="oem360_period")
 
@@ -45,423 +58,419 @@ if not oem or ref_year is None:
     st.warning("Select an OEM and time period.")
     st.stop()
 
+show_subcat = st.sidebar.checkbox("Show sub-category detail", value=True, key="oem360_subcat")
+st.sidebar.divider()
+
 latest_year, latest_month = get_latest_month()
 start_date, end_date = get_period_months(preset, ref_year, ref_month)
 
-st.sidebar.divider()
-
-# ── Load OEM data ──
+# ──────────────────────────────────────
+# LOAD DATA
+# ──────────────────────────────────────
 oem_data = get_oem_monthly_all(oem)
 if oem_data.empty:
     st.info(f"No data found for **{oem}**.")
     st.stop()
 
-# Get base categories this OEM participates in
 base_cats = get_oem_categories_list(oem)
-
-st.subheader(f"{oem} — {format_month(ref_year, ref_month)}")
-
-# ────────────────────────────────────────
-# SECTION 1: SNAPSHOT KPIs (for reference month)
-# ────────────────────────────────────────
 cat_data = get_oem_all_categories(oem, ref_year, ref_month)
 if cat_data.empty:
-    st.warning(f"No data for {oem} in {format_month(ref_year, ref_month)}. Try a different reference month.")
+    st.warning(f"No data for {oem} in {format_month(ref_year, ref_month)}. Try a different month.")
     st.stop()
 
-total_vol = cat_data["volume"].sum()
+# Aggregate monthly totals — BASE categories only (subsegments are already included in base)
+base_only = oem_data[oem_data["is_subsegment"] == 0]
+agg_monthly = base_only.groupby(["year", "month", "date"])["volume"].sum().reset_index()
+total_vol = cat_data[cat_data["category_code"].isin(
+    base_cats["category_code"] if not base_cats.empty else []
+)]["volume"].sum()
 
-# Compute aggregate growth rates (total across all categories)
-agg_monthly = oem_data.groupby(["year", "month", "date"])["volume"].sum().reset_index()
+st.subheader(f"{oem}")
+
+
+# ════════════════════════════════════════
+# SECTION 1: COMPANY VOLUME SNAPSHOT
+# ════════════════════════════════════════
 growth = compute_growth_rates(agg_monthly, ref_year, ref_month)
 fytd = compute_fytd(agg_monthly, ref_year, ref_month)
 
-col1, col2, col3, col4, col5, col6 = st.columns(6)
+col1, col2, col3, col4 = st.columns(4)
 with col1:
-    st.metric("Total Volume", format_units(total_vol))
-with col2:
-    st.metric("MoM Growth", format_pct(growth["mom_pct"]),
-              help="Month-on-Month: reference month volume vs previous month volume")
-with col3:
     st.metric(
-        "QoQ Growth", format_pct(growth["qoq_pct"]),
-        help="Compares the reference month's volume to the volume 3 months prior "
-             "(e.g., Feb'26 vs Nov'25). This is a single-month comparison, "
-             "not a sum of 3 months vs 3 months.",
+        f"Volume ({format_month(ref_year, ref_month)})",
+        format_units(total_vol),
     )
-with col4:
-    st.metric("YoY Growth", format_pct(growth["yoy_pct"]),
-              help="Year-on-Year: reference month volume vs same month previous year")
-with col5:
-    st.metric("FYTD Volume", format_units(fytd["fytd_vol"]) if fytd["fytd_vol"] else "N/A",
-              help="Fiscal Year To Date: cumulative volume from April of current FY through reference month")
-with col6:
-    st.metric("FYTD YoY", format_pct(fytd["fytd_yoy_pct"]),
-              help="FYTD vs same period in previous fiscal year")
-
-st.divider()
-
-# ────────────────────────────────────────
-# SECTION 2: MONTHLY SALES TABLE (Last 12 months)
-# ────────────────────────────────────────
-st.subheader("Monthly Sales")
-st.caption("Last 12 months — absolute volumes, YoY growth, and rolling 12-month sales")
-
-all_monthly = agg_monthly.sort_values("date").copy()
-all_monthly["ym"] = all_monthly["year"].astype(int) * 100 + all_monthly["month"].astype(int)
-vol_map = dict(zip(all_monthly["ym"], all_monthly["volume"]))
-
-# YoY for each month
-all_monthly["yoy_pct"] = all_monthly.apply(
-    lambda r: _safe_growth(r["volume"], vol_map.get((int(r["year"]) - 1) * 100 + int(r["month"]))),
-    axis=1,
-)
-
-# Rolling 12M
-all_monthly["rolling_12m"] = all_monthly["volume"].rolling(12, min_periods=12).sum()
-
-# Rolling 12M YoY
-r12m_map = dict(zip(all_monthly["ym"], all_monthly["rolling_12m"]))
-all_monthly["r12m_yoy_pct"] = all_monthly.apply(
-    lambda r: _safe_growth(r["rolling_12m"], r12m_map.get((int(r["year"]) - 1) * 100 + int(r["month"]))),
-    axis=1,
-)
-
-# Display last 12 months (latest first)
-last_12 = all_monthly.tail(12).iloc[::-1]
-display_monthly = pd.DataFrame({
-    "Month": last_12.apply(lambda r: format_month(int(r["year"]), int(r["month"])), axis=1).values,
-    "Volume": last_12["volume"].apply(format_units).values,
-    "YoY %": last_12["yoy_pct"].apply(lambda x: format_pct(x) if pd.notna(x) else "—").values,
-    "Rolling 12M": last_12["rolling_12m"].apply(lambda x: format_units(x) if pd.notna(x) else "—").values,
-    "R12M YoY %": last_12["r12m_yoy_pct"].apply(lambda x: format_pct(x) if pd.notna(x) else "—").values,
-})
-st.dataframe(display_monthly, use_container_width=True, hide_index=True)
-
-st.divider()
-
-# ────────────────────────────────────────
-# SECTION 3: QUARTERLY SALES TABLE
-# ────────────────────────────────────────
-st.subheader("Quarterly Sales")
-st.caption("Financial quarters (1Q = Apr-Jun, 2Q = Jul-Sep, 3Q = Oct-Dec, 4Q = Jan-Mar)")
-
-q_data = add_fy_columns(all_monthly.copy())
-quarterly = q_data.groupby(["fy", "quarter", "q_label"]).agg(
-    volume=("volume", "sum"),
-    month_count=("month", "count"),
-).reset_index()
-quarterly = quarterly.sort_values(["fy", "quarter"])
-
-# Build lookup for complete-quarter volumes
-q_vol_lookup = {}
-for _, r in quarterly.iterrows():
-    q_vol_lookup[(int(r["fy"]), int(r["quarter"]))] = r["volume"]
-
-# Track which months belong to each quarter (for partial-quarter fair comparison)
-q_month_sets = q_data.groupby(["fy", "quarter"])["month"].apply(lambda s: set(s.astype(int))).to_dict()
-
-# YoY for each quarter — partial quarters compare to same months from previous year
-q_yoy_list = []
-for _, r in quarterly.iterrows():
-    fy, q, vol, mc = int(r["fy"]), int(r["quarter"]), r["volume"], int(r["month_count"])
-    if mc < 3:
-        # Partial quarter: compare to same months from prev year's same quarter
-        current_months = q_month_sets.get((fy, q), set())
-        prev_q_data = q_data[
-            (q_data["fy"] == fy - 1) & (q_data["quarter"] == q) &
-            (q_data["month"].astype(int).isin(current_months))
-        ]
-        prev_vol = prev_q_data["volume"].sum() if not prev_q_data.empty else 0
-    else:
-        prev_vol = q_vol_lookup.get((fy - 1, q), 0)
-    q_yoy_list.append(_safe_growth(vol, prev_vol))
-quarterly["yoy_pct"] = q_yoy_list
-
-# Format quarter labels
-quarterly["display_label"] = quarterly.apply(
-    lambda r: f"{int(r['quarter'])}QFY{str(int(r['fy']) + 1)[-2:]}"
-              + (f" ({int(r['month_count'])}M)" if r["month_count"] < 3 else ""),
-    axis=1,
-)
-
-# Show last 8 quarters (latest first)
-display_q = quarterly.tail(8).iloc[::-1]
-display_quarterly = pd.DataFrame({
-    "Quarter": display_q["display_label"].values,
-    "Volume": display_q["volume"].apply(format_units).values,
-    "YoY %": display_q["yoy_pct"].apply(lambda x: format_pct(x) if pd.notna(x) else "—").values,
-})
-st.dataframe(display_quarterly, use_container_width=True, hide_index=True)
-
-st.divider()
-
-# ────────────────────────────────────────
-# SECTION 4: FISCAL YEAR PERFORMANCE
-# ────────────────────────────────────────
-st.subheader("Fiscal Year Performance")
-
-fy_data = add_fy_columns(all_monthly.copy())
-fy_month_counts = fy_data.groupby("fy")["month"].count().to_dict()
-fy_vols = fy_data.groupby(["fy", "fy_label"])["volume"].sum().reset_index()
-fy_vols = fy_vols.sort_values("fy")
-
-if not fy_vols.empty:
-    latest_fy = int(fy_vols["fy"].max())
-    fy_vol_lookup = dict(zip(fy_vols["fy"].astype(int), fy_vols["volume"]))
-
-    fy_rows = []
-    for _, r in fy_vols.iterrows():
-        fy_num = int(r["fy"])
-        label = r["fy_label"]
-        vol = r["volume"]
-        n_months = fy_month_counts.get(fy_num, 0)
-
-        if fy_num == latest_fy and n_months < 12:
-            # Incomplete FY: use FYTD comparison (same months from previous FY)
-            label = f"{label} (FYTD {n_months}M)"
-            current_fy_rows = fy_data[fy_data["fy"] == fy_num]
-            prev_vol = 0
-            for _, mr in current_fy_rows.iterrows():
-                prev_match = all_monthly[
-                    (all_monthly["year"] == int(mr["year"]) - 1) &
-                    (all_monthly["month"] == int(mr["month"]))
-                ]
-                if not prev_match.empty:
-                    prev_vol += prev_match["volume"].iloc[0]
-            yoy = _safe_growth(vol, prev_vol)
-        else:
-            # Complete FY: compare to previous FY
-            prev_fy_vol = fy_vol_lookup.get(fy_num - 1)
-            yoy = _safe_growth(vol, prev_fy_vol)
-
-        fy_rows.append({
-            "Fiscal Year": label,
-            "Volume": format_units(vol),
-            "YoY Growth %": format_pct(yoy) if yoy is not None else "—",
-        })
-
-    st.dataframe(pd.DataFrame(fy_rows), use_container_width=True, hide_index=True)
-
-st.divider()
-
-# ────────────────────────────────────────
-# SECTION 5: CATEGORY BREAKDOWN
-# ────────────────────────────────────────
-st.subheader("Category Breakdown")
-col1, col2 = st.columns(2)
-
-with col1:
-    fig = horizontal_bar(cat_data, x="volume", y="category_name",
-                         title=f"{oem} — Volume by Category")
-    st.plotly_chart(fig, use_container_width=True)
-
 with col2:
-    fig = donut_chart(cat_data, names="category_name", values="volume",
-                      title="Category Mix")
-    st.plotly_chart(fig, use_container_width=True)
-
-# Per-category growth rates (with Overall row at the top)
-st.markdown("**Category-wise Growth Rates**")
-cat_growth_rows = []
-
-# Overall row first
-cat_growth_rows.append({
-    "Category": "**Overall**",
-    "Volume": format_units(total_vol),
-    "MoM %": format_pct(growth["mom_pct"]),
-    "QoQ %": format_pct(growth["qoq_pct"]),
-    "YoY %": format_pct(growth["yoy_pct"]),
-    "FYTD Vol": format_units(fytd["fytd_vol"]) if fytd["fytd_vol"] else "N/A",
-    "FYTD YoY %": format_pct(fytd["fytd_yoy_pct"]),
-})
-
-# Per-category rows
-for _, row in cat_data.iterrows():
-    cc = row["category_code"]
-    cat_monthly = oem_data[oem_data["category_code"] == cc].copy()
-    if cat_monthly.empty:
-        continue
-    g = compute_growth_rates(cat_monthly, ref_year, ref_month)
-    f = compute_fytd(cat_monthly, ref_year, ref_month)
-    cat_growth_rows.append({
-        "Category": row["category_name"],
-        "Volume": format_units(row["volume"]),
-        "MoM %": format_pct(g["mom_pct"]),
-        "QoQ %": format_pct(g["qoq_pct"]),
-        "YoY %": format_pct(g["yoy_pct"]),
-        "FYTD Vol": format_units(f["fytd_vol"]) if f["fytd_vol"] else "N/A",
-        "FYTD YoY %": format_pct(f["fytd_yoy_pct"]),
-    })
-
-if cat_growth_rows:
-    st.dataframe(pd.DataFrame(cat_growth_rows), use_container_width=True, hide_index=True)
+    st.metric("YoY Growth", format_pct(growth["yoy_pct"]))
+with col3:
+    fy_start = get_fy_start_year(ref_year, ref_month)
+    st.metric(f"FYTD ({get_fy_label(fy_start)})",
+              format_units(fytd["fytd_vol"]) if fytd["fytd_vol"] else "N/A")
+with col4:
+    st.metric("FYTD YoY", format_pct(fytd["fytd_yoy_pct"]))
 
 st.divider()
 
-# ────────────────────────────────────────
-# SECTION 6: MARKET SHARE TRENDS
-# ────────────────────────────────────────
-st.subheader("Market Share Analysis")
+
+# ════════════════════════════════════════
+# SECTION 2: RETAIL SALES TREND + YoY
+# ════════════════════════════════════════
+st.subheader("Retail Sales Trend")
+
+trend = agg_monthly.sort_values("date").copy()
+trend = filter_by_period(trend, start_date, end_date)
+
+if not trend.empty:
+    trend = compute_growth_series(trend)
+
+    # Dual-axis chart: Volume bars + YoY line
+    chart_df = trend.dropna(subset=["yoy_pct"]).copy()
+    if not chart_df.empty:
+        fig = dual_axis_bar_line(
+            chart_df, x="date", bar_y="volume", line_y="yoy_pct",
+            title=f"{oem} — Monthly Volume & YoY Growth",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    # Compact summary table (last 12 months, newest first)
+    tbl = trend.tail(12).iloc[::-1].copy()
+    display_trend = pd.DataFrame({
+        "Month": tbl.apply(lambda r: format_month(int(r["year"]), int(r["month"])), axis=1).values,
+        "Volume": tbl["volume"].apply(format_units).values,
+        "YoY %": tbl["yoy_pct"].apply(lambda x: format_pct(x) if pd.notna(x) else "—").values,
+    })
+    with st.expander("Monthly Sales Table", expanded=False):
+        st.dataframe(display_trend, use_container_width=True, hide_index=True)
+
+st.divider()
+
+
+# ════════════════════════════════════════
+# SECTION 3: SUB-CATEGORY SALES MIX
+# ════════════════════════════════════════
+if show_subcat and not base_cats.empty:
+    st.subheader("Sub-Category Sales Mix")
+
+    for _, bcat in base_cats.iterrows():
+        base_code = bcat["category_code"]
+        base_name = bcat["category_name"]
+
+        # Check if OEM has meaningful volume in this base category
+        base_monthly = oem_data[oem_data["category_code"] == base_code].copy()
+        if base_monthly.empty:
+            continue
+
+        base_ref = base_monthly[
+            (base_monthly["year"] == ref_year) & (base_monthly["month"] == ref_month)
+        ]
+        if base_ref.empty or base_ref["volume"].iloc[0] < 10:
+            continue
+
+        # Get subsegments for this base
+        subs_df = get_subsegments_for_base(base_code)
+        if subs_df.empty:
+            continue  # No subsegments — nothing to decompose
+
+        sub_codes = subs_df["code"].tolist()
+        sub_names = dict(zip(subs_df["code"], subs_df["name"]))
+
+        st.markdown(f"#### {base_name}")
+
+        # ── Build mix DataFrame ──
+        # Get OEM monthly data for base + each subsegment
+        base_series = base_monthly[["year", "month", "date", "volume"]].copy()
+        base_series = base_series.rename(columns={"volume": "base_vol"})
+        base_series = filter_by_period(base_series, start_date, end_date)
+
+        mix_df = base_series.copy()
+        for sc in sub_codes:
+            sc_data = oem_data[oem_data["category_code"] == sc][["year", "month", "volume"]].copy()
+            sc_data = sc_data.rename(columns={"volume": sc})
+            mix_df = mix_df.merge(sc_data, on=["year", "month"], how="left")
+            mix_df[sc] = mix_df[sc].fillna(0)
+
+        # Compute ICE as residual
+        mix_df["ICE"] = mix_df["base_vol"] - mix_df[sub_codes].sum(axis=1)
+        mix_df["ICE"] = mix_df["ICE"].clip(lower=0)
+
+        # Build long-form for 100% stacked chart
+        fuel_types = ["ICE"] + sub_codes
+        fuel_labels = {"ICE": f"ICE {base_name}"}
+        fuel_labels.update({sc: sub_names.get(sc, sc) for sc in sub_codes})
+
+        long_rows = []
+        for _, row in mix_df.iterrows():
+            base_total = row["base_vol"]
+            if base_total <= 0:
+                continue
+            for ft in fuel_types:
+                vol = row[ft]
+                pct = round(vol / base_total * 100, 1) if base_total > 0 else 0
+                long_rows.append({
+                    "date": row["date"],
+                    "year": int(row["year"]),
+                    "month": int(row["month"]),
+                    "type": fuel_labels.get(ft, ft),
+                    "volume": vol,
+                    "pct": pct,
+                })
+
+        if not long_rows:
+            continue
+
+        long_df = pd.DataFrame(long_rows)
+
+        # ── 100% Stacked Bar Chart ──
+        # Pivot for plotly stacked bars
+        pivot_pct = long_df.pivot_table(index="date", columns="type", values="pct", fill_value=0)
+        pivot_pct = pivot_pct.sort_index()
+
+        colors = ["#636EFA", "#EF553B", "#00CC96", "#AB63FA", "#FFA15A", "#19D3F3"]
+        fig = go.Figure()
+        for i, col_name in enumerate(pivot_pct.columns):
+            fig.add_trace(go.Bar(
+                x=pivot_pct.index, y=pivot_pct[col_name],
+                name=col_name, marker_color=colors[i % len(colors)],
+            ))
+        fig.update_layout(
+            **LAYOUT_DEFAULTS,
+            barmode="stack",
+            title=f"{oem} — {base_name} Mix (%)",
+            yaxis_title="Share %",
+            height=400,
+        )
+        fig.update_xaxes(title="")
+        st.plotly_chart(fig, use_container_width=True)
+
+        # ── Volume Table ──
+        pivot_vol = long_df.pivot_table(index="date", columns="type", values="volume", fill_value=0)
+        pivot_vol = pivot_vol.sort_index(ascending=False)
+
+        # Format for display
+        display_mix = pivot_vol.copy()
+        display_mix.index = [format_month(d.year, d.month) for d in display_mix.index]
+        display_mix["Total"] = display_mix.sum(axis=1)
+
+        # YoY growth row for each column
+        if len(pivot_vol) >= 13:
+            latest_row = pivot_vol.iloc[-1]
+            yoy_row = pivot_vol.iloc[-13] if len(pivot_vol) >= 13 else None
+            if yoy_row is not None:
+                growth_vals = {}
+                for c in pivot_vol.columns:
+                    growth_vals[c] = format_pct(_safe_growth(latest_row[c], yoy_row[c]))
+                growth_vals["Total"] = format_pct(
+                    _safe_growth(latest_row.sum(), yoy_row.sum())
+                )
+
+        # Show last 6 months
+        disp_6 = display_mix.head(6).copy()
+        for c in disp_6.columns:
+            disp_6[c] = disp_6[c].apply(lambda x: format_units(x) if isinstance(x, (int, float, np.integer, np.floating)) else x)
+        disp_6.index.name = "Month"
+
+        with st.expander(f"{base_name} — Volume by Sub-Category", expanded=False):
+            st.dataframe(disp_6, use_container_width=True)
+
+            # YoY growth summary
+            if len(pivot_vol) >= 13:
+                st.caption("YoY Growth (latest month vs same month last year)")
+                latest_row = pivot_vol.iloc[-1]
+                yoy_row = pivot_vol.iloc[-13]
+                growth_items = []
+                for c in pivot_vol.columns:
+                    g = _safe_growth(latest_row[c], yoy_row[c])
+                    growth_items.append(f"**{c}**: {format_pct(g)}")
+                total_g = _safe_growth(latest_row.sum(), yoy_row.sum())
+                growth_items.append(f"**Total**: {format_pct(total_g)}")
+                st.markdown(" · ".join(growth_items))
+
+    st.divider()
+
+
+# ════════════════════════════════════════
+# SECTION 4: MARKET SHARE IN RELEVANT CATEGORIES
+# ════════════════════════════════════════
+st.subheader("Market Share")
 
 if base_cats.empty:
     st.info("No base category data for market share analysis.")
 else:
-    # Let user pick which category to analyze share for
-    cat_options = dict(zip(base_cats["category_name"], base_cats["category_code"]))
-    share_cat_name = st.selectbox("Select category for share analysis", list(cat_options.keys()), key="share_cat")
-    share_cat_code = cat_options[share_cat_name]
+    for _, bcat in base_cats.iterrows():
+        base_code = bcat["category_code"]
+        base_name = bcat["category_name"]
 
-    freq_label = frequency_selector(key="share_freq")
-    freq = freq_label.lower()
+        # Check OEM has volume in this category
+        base_ref_data = oem_data[
+            (oem_data["category_code"] == base_code) &
+            (oem_data["year"] == ref_year) &
+            (oem_data["month"] == ref_month)
+        ]
+        if base_ref_data.empty:
+            continue
 
-    # Get OEM share data
-    share_data = get_oem_with_market_totals(oem, share_cat_code)
-    if not share_data.empty:
+        st.markdown(f"#### {base_name}")
+
+        # Overall share in base category
+        share_data = get_oem_with_market_totals(oem, base_code)
+        if share_data.empty:
+            st.info(f"No share data for {base_name}.")
+            continue
+
         share_data = filter_by_period(share_data, start_date, end_date)
+        if share_data.empty:
+            continue
 
-        if freq != "monthly":
-            share_data = aggregate_by_frequency(share_data, freq, vol_col="oem_volume")
-        else:
-            share_data["period_label"] = share_data["date"].dt.strftime("%b %Y")
+        # Build combined share chart (overall + subsegments if enabled)
+        traces_df = share_data[["date", "share_pct"]].copy()
+        traces_df["type"] = f"Overall {base_name}"
 
-        if not share_data.empty:
-            fig = line_chart(share_data, x="date", y="share_pct",
-                             title=f"{oem} — {share_cat_name} Market Share ({freq_label})", height=420)
+        if show_subcat:
+            subs_df = get_subsegments_for_base(base_code)
+            for _, sub in subs_df.iterrows():
+                sub_share = get_oem_with_market_totals(oem, sub["code"])
+                if not sub_share.empty:
+                    sub_share = filter_by_period(sub_share, start_date, end_date)
+                    if not sub_share.empty:
+                        sub_trace = sub_share[["date", "share_pct"]].copy()
+                        sub_trace["type"] = sub["name"]
+                        traces_df = pd.concat([traces_df, sub_trace], ignore_index=True)
+
+        if not traces_df.empty:
+            fig = line_chart(traces_df, x="date", y="share_pct", color="type",
+                             title=f"{oem} — {base_name} Market Share", height=400)
             fig.update_yaxes(title="Market Share %")
             st.plotly_chart(fig, use_container_width=True)
 
-            # ── Powertrain Breakdown (ICE vs EV vs Overall) ──
-            subs = get_subsegments_for_base(share_cat_code)
-            ev_subs = subs[subs["code"].str.startswith("EV_")]
-
-            if not ev_subs.empty:
-                st.markdown(f"**Powertrain Share Breakdown — {share_cat_name}**")
-                st.caption(f"Overall {share_cat_name} share vs EV-only share vs ICE-only share")
-
-                # Overall share already computed above
-                overall_share = share_data[["date", "share_pct"]].copy()
-                overall_share["type"] = f"Overall {share_cat_name}"
-
-                # EV share: OEM's EV volume / total EV volume
-                ev_code = ev_subs["code"].iloc[0]
-                ev_share_data = get_oem_with_market_totals(oem, ev_code)
-                ev_rows = pd.DataFrame()
-                if not ev_share_data.empty:
-                    ev_share_data = filter_by_period(ev_share_data, start_date, end_date)
-                    if freq != "monthly":
-                        ev_share_data = aggregate_by_frequency(ev_share_data, freq, vol_col="oem_volume")
-                    if not ev_share_data.empty:
-                        ev_rows = ev_share_data[["date", "share_pct"]].copy()
-                        ev_rows["type"] = f"EV {share_cat_name}"
-
-                # ICE share: computed from (overall vol - EV vol) / (total - total EV)
-                base_total = get_category_monthly_all(share_cat_code)
-                ev_total = get_category_monthly_all(ev_code)
-                oem_base = get_oem_with_market_totals(oem, share_cat_code)
-                oem_ev_raw = get_oem_with_market_totals(oem, ev_code)
-
-                ice_rows = pd.DataFrame()
-                if not oem_base.empty and not base_total.empty:
-                    # Safely handle OEMs with no EV data (e.g., Royal Enfield)
-                    if not oem_ev_raw.empty and "date" in oem_ev_raw.columns and "oem_volume" in oem_ev_raw.columns:
-                        ev_oem_merge = oem_ev_raw[["date", "oem_volume"]].rename(columns={"oem_volume": "ev_oem_vol"})
-                    else:
-                        ev_oem_merge = pd.DataFrame(columns=["date", "ev_oem_vol"])
-
-                    ice_calc = oem_base[["date", "oem_volume"]].merge(
-                        ev_oem_merge, on="date", how="left"
-                    )
-                    ice_calc["ev_oem_vol"] = ice_calc["ev_oem_vol"].fillna(0)
-                    ice_calc["ice_oem_vol"] = ice_calc["oem_volume"] - ice_calc["ev_oem_vol"]
-
-                    cat_merge = base_total[["date", "volume"]].rename(columns={"volume": "base_vol"})
-                    ev_merge = ev_total[["date", "volume"]].rename(columns={"volume": "ev_vol"}) if not ev_total.empty else pd.DataFrame(columns=["date", "ev_vol"])
-                    ice_calc = ice_calc.merge(cat_merge, on="date", how="left")
-                    ice_calc = ice_calc.merge(ev_merge, on="date", how="left")
-                    ice_calc["ev_vol"] = ice_calc["ev_vol"].fillna(0)
-                    ice_calc["ice_total"] = ice_calc["base_vol"] - ice_calc["ev_vol"]
-
-                    ice_calc = filter_by_period(ice_calc, start_date, end_date)
-                    mask = ice_calc["ice_total"] > 0
-                    ice_calc.loc[mask, "share_pct"] = (ice_calc.loc[mask, "ice_oem_vol"] / ice_calc.loc[mask, "ice_total"] * 100).round(2)
-
-                    if not ice_calc.empty:
-                        ice_rows = ice_calc[["date", "share_pct"]].dropna(subset=["share_pct"]).copy()
-                        ice_rows["type"] = f"ICE {share_cat_name}"
-
-                # Combine all
-                combined = pd.concat([overall_share, ev_rows, ice_rows], ignore_index=True)
-                if not combined.empty and combined["type"].nunique() > 1:
-                    fig = line_chart(combined, x="date", y="share_pct", color="type",
-                                     title=f"{oem} — Share by Powertrain ({share_cat_name})", height=420)
-                    fig.update_yaxes(title="Market Share %")
-                    st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info(f"No market share data for {oem} in {share_cat_name}.")
+        # Share table (last 6 months)
+        share_tbl = share_data.sort_values("date", ascending=False).head(6)
+        display_share = pd.DataFrame({
+            "Month": share_tbl.apply(
+                lambda r: format_month(int(r["year"]), int(r["month"])), axis=1
+            ).values,
+            "OEM Volume": share_tbl["oem_volume"].apply(format_units).values,
+            "Market Total": share_tbl["total_volume"].apply(format_units).values,
+            "Share %": share_tbl["share_pct"].apply(lambda x: f"{x:.1f}%").values,
+        })
+        with st.expander(f"{base_name} Share — Last 6 Months", expanded=False):
+            st.dataframe(display_share, use_container_width=True, hide_index=True)
 
 st.divider()
 
-# ────────────────────────────────────────
-# SECTION 7: VOLUME TREND WITH GROWTH RATES
-# ────────────────────────────────────────
-st.subheader("Volume Trend")
 
-vol_trend = agg_monthly.copy()
-vol_trend = filter_by_period(vol_trend, start_date, end_date)
-
-if not vol_trend.empty:
-    vol_trend = vol_trend.sort_values("date")
-    fig = monthly_bar_chart(vol_trend, x="date", y="volume",
-                            title=f"{oem} — Monthly Total Volume")
-    st.plotly_chart(fig, use_container_width=True)
-
-    # Growth rates table
-    vol_with_growth = compute_growth_series(vol_trend)
-    if not vol_with_growth.empty:
-        with st.expander("Monthly Growth Rates Table"):
-            display_df = vol_with_growth[["year", "month", "volume", "yoy_pct", "qoq_pct", "mom_pct"]].copy()
-            display_df.insert(0, "Period", display_df.apply(lambda r: format_month(int(r["year"]), int(r["month"])), axis=1))
-            display_df["volume"] = display_df["volume"].apply(format_units)
-            for c in ["yoy_pct", "qoq_pct", "mom_pct"]:
-                display_df[c] = display_df[c].apply(lambda x: format_pct(x) if pd.notna(x) else "—")
-            display_df = display_df.rename(columns={"volume": "Volume", "yoy_pct": "YoY %", "qoq_pct": "QoQ %", "mom_pct": "MoM %"})
-            display_df = display_df[["Period", "Volume", "YoY %", "QoQ %", "MoM %"]]
-            st.dataframe(display_df, use_container_width=True, hide_index=True)
-
-st.divider()
-
-# ────────────────────────────────────────
-# SECTION 8: STATE-LEVEL ANALYSIS
-# ────────────────────────────────────────
+# ════════════════════════════════════════
+# SECTION 5: STATE ANALYSIS
+# ════════════════════════════════════════
 if has_state_data():
-    st.subheader("State-Level Analysis")
+    st.subheader("State Analysis")
 
+    # Pick the primary category for state analysis
     cat_options_state = dict(zip(cat_data["category_name"], cat_data["category_code"]))
-    selected_cat_name = st.selectbox("Category for state analysis", list(cat_options_state.keys()), key="state_cat")
-    selected_cat = cat_options_state[selected_cat_name]
+    # Filter to base categories only
+    base_cat_codes = set(base_cats["category_code"]) if not base_cats.empty else set()
+    state_cat_options = {k: v for k, v in cat_options_state.items() if v in base_cat_codes}
+    if not state_cat_options:
+        state_cat_options = cat_options_state  # Fallback
 
-    state_dist = get_oem_state_distribution(oem, selected_cat, ref_year, ref_month)
-    if not state_dist.empty:
-        col1, col2 = st.columns(2)
-        with col1:
-            fig = horizontal_bar(state_dist.head(15), x="volume", y="state",
-                                 title=f"Top States — {oem} ({selected_cat_name})")
-            st.plotly_chart(fig, use_container_width=True)
+    if state_cat_options:
+        selected_cat_name = st.selectbox(
+            "Category for state analysis",
+            list(state_cat_options.keys()), key="state_cat_360"
+        )
+        selected_cat = state_cat_options[selected_cat_name]
 
-        with col2:
-            states = state_dist["state"].tolist()
-            selected_state = st.selectbox("Track share in state", states[:10], key="state_share")
-            if selected_state:
-                share_trend = get_oem_state_share_trend(oem, selected_cat, selected_state, months=60)
-                if not share_trend.empty:
-                    share_trend = filter_by_period(share_trend, start_date, end_date)
-                    if not share_trend.empty:
-                        fig = line_chart(share_trend, x="date", y="share_pct",
-                                         title=f"Share Trend in {selected_state}")
-                        fig.update_yaxes(title="Market Share %")
-                        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("No state data for this OEM/category. Scrape Vahan to populate.")
+        # ── 5A: State Sales Mix (Top 15 states by contribution) ──
+        state_market = get_oem_state_market_shares(oem, selected_cat, ref_year, ref_month)
+
+        if not state_market.empty:
+            col_a, col_b = st.columns(2)
+
+            with col_a:
+                top_states = state_market.head(15).copy()
+                fig = horizontal_bar(
+                    top_states, x="oem_volume", y="state",
+                    title=f"Top States — {oem} ({selected_cat_name})",
+                    text=top_states["contribution_pct"].apply(lambda x: f"{x:.1f}%"),
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+            with col_b:
+                # State market share table
+                state_share_tbl = state_market.head(15).copy()
+                display_state = pd.DataFrame({
+                    "State": state_share_tbl["state"].values,
+                    "Volume": state_share_tbl["oem_volume"].apply(format_units).values,
+                    "Mkt Share %": state_share_tbl["share_pct"].apply(
+                        lambda x: f"{x:.1f}%"
+                    ).values,
+                    "Contribution %": state_share_tbl["contribution_pct"].apply(
+                        lambda x: f"{x:.1f}%"
+                    ).values,
+                })
+                st.dataframe(display_state, use_container_width=True, hide_index=True)
+
+            # ── 5B: State YoY Growth Table ──
+            st.markdown("**State YoY Growth**")
+
+            top_state_names = state_market.head(15)["state"].tolist()
+            state_oem_monthly = get_state_oem_monthly(oem, selected_cat)
+
+            if not state_oem_monthly.empty:
+                # Get last 3 reference months for comparison
+                ref_ym = ref_year * 100 + ref_month
+                available_yms = sorted(state_oem_monthly["year"].astype(int) * 100 +
+                                       state_oem_monthly["month"].astype(int))
+                available_yms = [ym for ym in available_yms if ym <= ref_ym]
+                # Take last 3 unique months
+                unique_yms = sorted(set(available_yms), reverse=True)[:3]
+
+                if unique_yms:
+                    growth_rows = []
+                    for state in top_state_names:
+                        s_data = state_oem_monthly[state_oem_monthly["state"] == state].copy()
+                        if s_data.empty:
+                            continue
+                        s_data["ym"] = s_data["year"].astype(int) * 100 + s_data["month"].astype(int)
+                        vol_map = dict(zip(s_data["ym"], s_data["volume"]))
+
+                        row = {"State": state}
+                        for ym in unique_yms:
+                            y = ym // 100
+                            m = ym % 100
+                            curr = vol_map.get(ym)
+                            prev = vol_map.get((y - 1) * 100 + m)
+                            g = _safe_growth(curr, prev)
+                            label = format_month(y, m)
+                            row[label] = format_pct(g) if g is not None else "—"
+                        growth_rows.append(row)
+
+                    if growth_rows:
+                        st.dataframe(
+                            pd.DataFrame(growth_rows),
+                            use_container_width=True, hide_index=True,
+                        )
+
+            # ── 5C: State Share Trend ──
+            with st.expander("State Share Trend", expanded=False):
+                top_5_states = state_market.head(5)["state"].tolist()
+                selected_state = st.selectbox(
+                    "Select state for share trend",
+                    top_5_states, key="state_share_trend_360",
+                )
+                if selected_state:
+                    trend_data = get_oem_state_share_trend(
+                        oem, selected_cat, selected_state, months=60,
+                    )
+                    if not trend_data.empty:
+                        trend_data = filter_by_period(trend_data, start_date, end_date)
+                        if not trend_data.empty:
+                            fig = line_chart(
+                                trend_data, x="date", y="share_pct",
+                                title=f"Share Trend in {selected_state}",
+                            )
+                            fig.update_yaxes(title="Market Share %")
+                            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No state data for this OEM/category combination.")
 else:
     st.info("State-level data not yet available. Use the Vahan scraper to populate state data.")

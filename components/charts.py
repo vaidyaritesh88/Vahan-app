@@ -79,6 +79,35 @@ def kpi_row(metrics, cols):
             )
 
 
+def dual_axis_bar_line(df, x="date", bar_y="volume", line_y="yoy_pct",
+                       title="", bar_name="Volume", line_name="YoY %",
+                       height=420):
+    """Dual-axis chart: bars for volume (left axis) + line for growth % (right axis)."""
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=df[x], y=df[bar_y], name=bar_name,
+        marker_color="#1f77b4", opacity=0.75,
+        yaxis="y",
+    ))
+    fig.add_trace(go.Scatter(
+        x=df[x], y=df[line_y], name=line_name,
+        mode="lines+markers", line=dict(color="#d62728", width=2.5),
+        marker=dict(size=6),
+        yaxis="y2",
+    ))
+    fig.update_layout(
+        **LAYOUT_DEFAULTS,
+        height=height,
+        title=title,
+        yaxis=dict(title="Volume", side="left"),
+        yaxis2=dict(title="YoY %", side="right", overlaying="y",
+                    zeroline=True, zerolinecolor="rgba(0,0,0,0.2)"),
+        hovermode="x unified",
+    )
+    fig.update_xaxes(title="")
+    return fig
+
+
 def yoy_bar_chart(df, title="YoY Growth", height=350):
     """Bar chart showing YoY growth rates with color coding."""
     fig = go.Figure()

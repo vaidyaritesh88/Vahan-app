@@ -130,6 +130,11 @@ class VahanHttpScraper:
         self._state_id = None
         self._number_format_id = None
 
+        # Checkbox label→value maps discovered from page HTML.
+        # Keys = PrimeFaces element names (VhClass, VhCatg, fuel).
+        # Values = dict mapping label (e.g. "MOTOR CAR") to form value (e.g. "7").
+        self._checkbox_options = {}  # {panel_name: {label: value, ...}}
+
         # Form fields saved from the last refresh click, for use in pagination.
         # PrimeFaces AJAX serializes the entire form with every request —
         # pagination requests must include these or the server ignores them.
@@ -191,6 +196,24 @@ class VahanHttpScraper:
             if "'A'" in content and "Actual" in content:
                 self._number_format_id = sel_id.replace("_input", "")
                 break
+
+        # Discover checkbox options for VhClass, VhCatg, fuel panels.
+        # PrimeFaces SelectManyCheckbox renders as:
+        #   <input id="VhClass:0" name="VhClass" type="checkbox" value="7" />
+        #   <label for="VhClass:0">MOTOR CAR</label>
+        for panel_name in ("VhClass", "VhCatg", "fuel"):
+            pattern = (
+                rf'<input\s+id="{panel_name}:(\d+)"\s+name="{panel_name}"'
+                rf'\s+type="checkbox"\s+value="([^"]+)"\s*/?>'
+                rf'.*?<label\s+for="{panel_name}:\1">([^<]+)</label>'
+            )
+            matches = re.findall(pattern, html)
+            if matches:
+                label_map = {label.strip(): value for _, value, label in matches}
+                self._checkbox_options[panel_name] = label_map
+                logger.info(f"Discovered {len(label_map)} options for {panel_name}")
+            else:
+                logger.warning(f"No checkbox options found for {panel_name}")
 
     def _extract_viewstate(self, text):
         """Extract javax.faces.ViewState from HTML or AJAX response.
@@ -338,62 +361,71 @@ class VahanHttpScraper:
         )
         time.sleep(0.5)
 
-        # 7. Set vehicle class/category/fuel checkbox filters
+        # 7. Resolve checkbox filter labels → form values (no AJAX needed).
+        # Values are stored in self._checkbox_values for inclusion in
+        # the refresh POST (see _find_and_click_refresh).
         self._set_checkbox_filters(config)
-        time.sleep(0.5)
 
     def _set_checkbox_filters(self, config):
-        """Set vehicle class, category, and fuel checkbox filters.
+        """Resolve checkbox filter labels to form values.
 
-        PrimeFaces selectCheckboxMenu sends selected values in a specific format.
-        We need to find the panel IDs and set the right checkbox values.
+        Maps config labels (e.g. "MOTOR CAR") to the form values the Vahan
+        portal expects (e.g. "7") using the label→value maps discovered
+        from the page HTML.
+
+        Stores resolved values in self._checkbox_values for inclusion in
+        the refresh button POST.  No AJAX calls needed — checkboxes are
+        submitted as part of the form data, not toggled individually.
+
+        Panel name mapping:
+            config key "vehicle_class"    → form element "VhClass"
+            config key "vehicle_category" → form element "VhCatg"
+            config key "fuel"             → form element "fuel"
         """
-        # Vehicle class filter
-        if "vehicle_class" in config:
-            self._toggle_checkboxes("selectedVhclType", config["vehicle_class"])
+        PANEL_MAP = {
+            "vehicle_class": "VhClass",
+            "vehicle_category": "VhCatg",
+            "fuel": "fuel",
+        }
 
-        # Vehicle category filter
-        if "vehicle_category" in config:
-            self._toggle_checkboxes("selectedVhclCatgry", config["vehicle_category"])
+        self._checkbox_values = {}  # {panel_name: [value1, value2, ...]}
 
-        # Fuel filter
-        if "fuel" in config:
-            self._toggle_checkboxes("selectedFuel", config["fuel"])
+        for config_key, panel_name in PANEL_MAP.items():
+            if config_key not in config:
+                continue
 
-    def _toggle_checkboxes(self, panel_id, labels):
-        """Toggle checkbox selections in a PrimeFaces selectCheckboxMenu."""
-        # PrimeFaces selectCheckboxMenu submits selected items as panel_id=val1,val2,...
-        # We need to find checkbox indices by their labels, then send toggling events
+            labels = config[config_key]
+            label_map = self._checkbox_options.get(panel_name, {})
+            resolved = []
 
-        # For each label, send a toggle AJAX call
-        for i, label in enumerate(labels):
-            try:
-                data = {
-                    "javax.faces.partial.ajax": "true",
-                    "javax.faces.source": panel_id,
-                    "javax.faces.partial.execute": panel_id,
-                    "javax.faces.partial.render": panel_id,
-                    "javax.faces.behavior.event": "toggleSelect",
-                    "javax.faces.partial.event": "toggleSelect",
-                    "masterLayout_formlogin": "masterLayout_formlogin",
-                    panel_id: panel_id,
-                    "javax.faces.ViewState": self.viewstate,
-                }
-                r = self.session.post(self.form_url, data=data, timeout=self.timeout, headers={
-                    "Faces-Request": "partial/ajax",
-                    "X-Requested-With": "XMLHttpRequest",
-                })
-                new_vs = self._extract_viewstate(r.text)
-                if new_vs:
-                    self.viewstate = new_vs
-                time.sleep(0.3)
-            except Exception as e:
-                logger.warning(f"Checkbox toggle for {panel_id}/{label}: {e}")
+            for label in labels:
+                value = label_map.get(label)
+                if value:
+                    resolved.append(value)
+                    logger.debug(f"Checkbox {panel_name}: '{label}' -> value={value}")
+                else:
+                    logger.warning(
+                        f"Checkbox {panel_name}: label '{label}' not found in "
+                        f"{len(label_map)} options. Available: "
+                        f"{list(label_map.keys())[:10]}..."
+                    )
+
+            if resolved:
+                self._checkbox_values[panel_name] = resolved
+                logger.info(f"Checkbox filter {panel_name}: {len(resolved)} values selected "
+                            f"({resolved})")
+            else:
+                logger.warning(f"No values resolved for {panel_name} — "
+                               f"filter will NOT be applied!")
 
     def _find_and_click_refresh(self, state_code, year, config):
         """Submit the form by finding and clicking the refresh button.
 
-        As a fallback, we do a full form POST with all parameters.
+        Includes checkbox filter values (VhClass, VhCatg, fuel) resolved by
+        _set_checkbox_filters().  PrimeFaces SelectManyCheckbox submits
+        multiple checked values as repeated form params, e.g.:
+            VhClass=7&VhClass=71  (for "MOTOR CAR" + "MOTOR CAB")
+
         Also saves form field values for use in subsequent pagination requests.
         """
         # Build form data with all current selections
@@ -411,6 +443,14 @@ class VahanHttpScraper:
             form_data[f"{self._number_format_id}_input"] = "A"
         if self._state_id:
             form_data[f"{self._state_id}_input"] = state_code
+
+        # Add checkbox filter values (resolved by _set_checkbox_filters).
+        # PrimeFaces SelectManyCheckbox uses repeated params for multi-select.
+        checkbox_values = getattr(self, "_checkbox_values", {})
+        for panel_name, values in checkbox_values.items():
+            if values:
+                form_data[panel_name] = values  # list → repeated params
+                logger.info(f"Including {panel_name}={values} in refresh POST")
 
         # Try common refresh button IDs
         for btn_id in ["j_idt61", "j_idt59", "j_idt57", "j_idt63", "j_idt65"]:

@@ -7,15 +7,13 @@ MONTH_NAMES = [
 
 
 def format_units(value):
-    """Format large numbers Indian style: 12.3L, 1.5Cr, 45.2K."""
+    """Format large numbers: 456.9K, 1.2M."""
     if value is None or value == 0:
         return "0"
     abs_val = abs(value)
     sign = "-" if value < 0 else ""
-    if abs_val >= 1_00_00_000:
-        return f"{sign}{abs_val / 1_00_00_000:.1f}Cr"
-    elif abs_val >= 1_00_000:
-        return f"{sign}{abs_val / 1_00_000:.1f}L"
+    if abs_val >= 1_000_000:
+        return f"{sign}{abs_val / 1_000_000:.1f}M"
     elif abs_val >= 1_000:
         return f"{sign}{abs_val / 1_000:.1f}K"
     return f"{sign}{int(abs_val)}"
