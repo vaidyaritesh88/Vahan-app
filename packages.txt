@@ -1,12 +1,3 @@
-chromium
-chromium-driver
-libglib2.0-0
-libnss3
-libgconf-2-4
-libfontconfig1
-libxss1
-libappindicator3-1
-libasound2
-libatk-bridge2.0-0
-libgtk-3-0
-libx11-xcb1
+# Chromium and related libs are only needed for the scraper,
+# which runs locally (Vahan portal blocks cloud IPs).
+# Removed: chromium, chromium-driver, libgconf-2-4, libappindicator3-1, etc.
