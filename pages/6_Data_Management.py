@@ -73,183 +73,209 @@ with tab1:
 # ── Tab 2: State Data Scraper ──
 with tab2:
     st.subheader("State-Level Data Scraper")
-    st.markdown("""
-    Scrape state-level registration data from the Vahan portal.
-    Data is stored with **upsert logic** — re-scraping the same combination
-    will update existing records without creating duplicates.
-    """)
+    st.markdown(
+        "Scrape state-level registration data from the Vahan portal. "
+        "The scraper runs as a **background process** — you can close this tab "
+        "or browser and it keeps running. Data is saved in real-time after each combo."
+    )
 
     # Cloud environment detection
     import platform as _plat
     _is_cloud = _plat.system() == "Linux" and "/home/appuser" in os.environ.get("HOME", "")
     if _is_cloud:
         st.warning(
-            "**Note:** The Vahan portal (govt. website) blocks cloud server IPs. "
-            "The scraper works best when you run the app **locally** (`streamlit run app.py`). "
-            "All other features (dashboards, charts, AI Chat) work fine on Streamlit Cloud."
+            "**Note:** The Vahan portal blocks cloud server IPs. "
+            "Run the scraper **locally** (`streamlit run app.py`)."
         )
 
-    # Connection test
-    col_test, col_info = st.columns([1, 2])
-    with col_test:
-        if st.button("Test Connection"):
-            with st.spinner("Testing connection to Vahan portal..."):
-                try:
-                    from scraper.vahan_http_scraper import VahanHttpScraper
-                    scraper = VahanHttpScraper()
-                    ok, msg = scraper.test_connection()
-                    if ok:
-                        st.success(msg)
-                        # Remember SSL setting for scraping session
-                        if not scraper.verify_ssl:
-                            st.session_state["vahan_verify_ssl"] = False
-                    else:
-                        st.error(msg)
-                except Exception as e:
-                    st.error(f"Error: {str(e)}")
-    with col_info:
-        st.info("The scraper uses HTTP requests — no Chrome/Selenium needed.")
+    # ── Live Status: check if scraper is running ──
+    from scraper.run_background import is_scraper_running, request_stop, CONTROL_FILE
 
-    st.divider()
+    scraper_running, ctrl_info = is_scraper_running()
 
-    # ── Scrape Configuration ──
-    st.markdown("### Configure Scrape Job")
+    if scraper_running and ctrl_info:
+        st.markdown("---")
+        status_label = ctrl_info.get("status", "running")
+        if status_label == "stopping":
+            st.warning("Scraper is **stopping** (finishing current job)...")
+        else:
+            st.success("Scraper is **running** in the background")
 
-    # Key categories for investment analysis
-    key_categories = ["2W", "PV", "3W", "LCV", "MHCV", "EV_2W", "EV_PV", "EV_3W", "TRACTORS"]
-    # Key states (top 15 by vehicle registrations)
-    key_states = [
-        "Maharashtra", "Tamil Nadu", "Karnataka", "Gujarat", "Uttar Pradesh",
-        "Rajasthan", "Delhi", "Haryana", "Kerala", "Madhya Pradesh",
-        "Andhra Pradesh", "Telangana", "West Bengal", "Punjab", "Bihar",
-    ]
+        # Progress metrics
+        total_jobs = ctrl_info.get("total_jobs", 0)
+        completed = ctrl_info.get("completed", 0)
+        bg_success = ctrl_info.get("success", 0)
+        bg_failed = ctrl_info.get("failed", 0)
+        bg_rows = ctrl_info.get("total_rows", 0)
+        current_job = ctrl_info.get("current_job", "")
+        started_at = ctrl_info.get("started_at", "")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        scrape_categories = st.multiselect(
-            "Categories to scrape",
-            list(VAHAN_SCRAPE_CONFIGS.keys()),
-            default=key_categories,
-            key="scrape_cats",
-        )
-    with col2:
-        scrape_states = st.multiselect(
-            "States to scrape",
-            ALL_STATES,
-            default=key_states,
-            key="scrape_states",
-        )
+        # Progress bar
+        if total_jobs > 0:
+            pct = completed / total_jobs
+            st.progress(pct, text=f"{completed} / {total_jobs} combinations ({pct:.0%})")
 
-    col3, col4, col5 = st.columns(3)
-    with col3:
-        year_range = st.slider(
-            "Year Range",
-            min_value=2019, max_value=2026,
-            value=(2020, 2026),
-            key="year_range",
-        )
-        scrape_years = list(range(year_range[0], year_range[1] + 1))
-    with col4:
-        skip_existing = st.checkbox("Skip already scraped", value=True, key="skip_existing",
-                                    help="Skip state/category/year combos that were already successfully scraped")
-    with col5:
-        delay_between = st.slider("Delay between requests (sec)", 1, 10, 2, key="delay",
-                                  help="Pause between scrape calls to avoid rate limiting")
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Completed", f"{completed:,}")
+        with col2:
+            st.metric("Succeeded", f"{bg_success:,}")
+        with col3:
+            st.metric("Failed", f"{bg_failed:,}")
+        with col4:
+            st.metric("Rows Scraped", format_units(bg_rows))
 
-    # Calculate job size
-    total_combos = len(scrape_categories) * len(scrape_states) * len(scrape_years)
+        if current_job:
+            st.caption(f"Current: {current_job}")
+        if started_at:
+            st.caption(f"Started: {started_at[:19]}")
 
-    pending_combos = total_combos
-    if skip_existing:
-        try:
-            from scraper.vahan_http_scraper import get_pending_scrapes
-            pending = get_pending_scrapes(scrape_categories, scrape_states, scrape_years)
-            pending_combos = len(pending)
-        except Exception:
-            pending_combos = total_combos
-
-    st.markdown(
-        f"**Job size:** {total_combos} total combinations "
-        f"({'**' + str(pending_combos) + ' pending**' if skip_existing else 'all will be scraped'})"
-    )
-
-    if pending_combos > 100:
-        est_minutes = (pending_combos * (delay_between + 3)) / 60
-        st.caption(f"Estimated time: ~{est_minutes:.0f} minutes at {delay_between}s delay")
-
-    st.divider()
-
-    # ── Start Scraping ──
-    if st.button("Start Scraping", type="primary", disabled=(pending_combos == 0)):
-        import time
-
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        results_container = st.container()
-
-        success_count = 0
-        fail_count = 0
-        total_rows = 0
-
-        try:
-            from scraper.vahan_http_scraper import VahanHttpScraper, get_pending_scrapes
-
-            # Determine what to scrape
-            if skip_existing:
-                jobs = get_pending_scrapes(scrape_categories, scrape_states, scrape_years)
-            else:
-                jobs = [(c, s, y) for c in scrape_categories
-                        for s in scrape_states for y in scrape_years]
-
-            if not jobs:
-                st.success("All combinations already scraped! Uncheck 'Skip already scraped' to re-fetch.")
-            else:
-                verify_ssl = st.session_state.get("vahan_verify_ssl", True)
-                scraper = VahanHttpScraper(verify_ssl=verify_ssl)
-
-                for i, (cat, state, year) in enumerate(jobs):
-                    status_text.text(f"Scraping {cat} / {state} / {year}  ({i+1}/{len(jobs)})")
-                    try:
-                        rows = scraper.scrape_and_store(cat, state, year)
-                        total_rows += rows
-                        success_count += 1
-                    except Exception as e:
-                        fail_count += 1
-                        with results_container:
-                            st.warning(f"Failed: {cat}/{state}/{year} — {str(e)[:100]}")
-
-                    progress_bar.progress((i + 1) / len(jobs))
-                    time.sleep(delay_between)
-
-                status_text.empty()
-                st.success(
-                    f"Scraping complete! "
-                    f"{success_count} succeeded, {fail_count} failed, "
-                    f"{total_rows:,} total records upserted."
-                )
-
-                # Auto-aggregate state data into national totals
-                if success_count > 0:
-                    with st.spinner("Aggregating state data → national totals..."):
-                        agg_rows = aggregate_state_to_national()
-                        st.success(f"Aggregated state data → {agg_rows:,} national records updated/inserted.")
-
-                if fail_count > 0:
-                    st.info("Failed jobs can be retried by running the scraper again with the same settings.")
+        # Stop button
+        if status_label != "stopping":
+            if st.button("Stop Scraping", type="secondary", key="btn_stop"):
+                request_stop()
+                st.warning("Stop signal sent. Scraper will finish the current job and exit.")
+                import time; time.sleep(2)
                 st.rerun()
 
-        except ImportError as e:
-            st.error(f"Import error: {str(e)}")
-        except Exception as e:
-            st.error(f"Scraper error: {str(e)}")
+        # Auto-refresh every 10 seconds while running
+        import time
+        time.sleep(10)
+        st.rerun()
+
+    else:
+        # ── Scrape Configuration (only show when not running) ──
+        # Connection test
+        col_test, col_info = st.columns([1, 2])
+        with col_test:
+            if st.button("Test Connection"):
+                with st.spinner("Testing connection to Vahan portal..."):
+                    try:
+                        from scraper.vahan_http_scraper import VahanHttpScraper
+                        scraper = VahanHttpScraper()
+                        ok, msg = scraper.test_connection()
+                        if ok:
+                            st.success(msg)
+                        else:
+                            st.error(msg)
+                    except Exception as e:
+                        st.error(f"Error: {str(e)}")
+        with col_info:
+            st.info("The scraper uses HTTP requests — no Chrome/Selenium needed.")
+
+        st.divider()
+        st.markdown("### Configure Scrape Job")
+
+        key_categories = ["2W", "PV", "3W", "LCV", "MHCV", "EV_2W", "EV_PV", "EV_3W", "TRACTORS"]
+        key_states = [
+            "Maharashtra", "Tamil Nadu", "Karnataka", "Gujarat", "Uttar Pradesh",
+            "Rajasthan", "Delhi", "Haryana", "Kerala", "Madhya Pradesh",
+            "Andhra Pradesh", "Telangana", "West Bengal", "Punjab", "Bihar",
+        ]
+
+        col1, col2 = st.columns(2)
+        with col1:
+            scrape_categories = st.multiselect(
+                "Categories to scrape",
+                list(VAHAN_SCRAPE_CONFIGS.keys()),
+                default=key_categories,
+                key="scrape_cats",
+            )
+        with col2:
+            scrape_states = st.multiselect(
+                "States to scrape",
+                ALL_STATES,
+                default=key_states,
+                key="scrape_states",
+            )
+
+        col3, col4, col5 = st.columns(3)
+        with col3:
+            year_range = st.slider(
+                "Year Range",
+                min_value=2019, max_value=2026,
+                value=(2020, 2026),
+                key="year_range",
+            )
+            scrape_years = list(range(year_range[0], year_range[1] + 1))
+        with col4:
+            skip_existing = st.checkbox("Skip already scraped", value=True, key="skip_existing",
+                                        help="Skip combos already successfully scraped")
+        with col5:
+            delay_between = st.slider("Delay between requests (sec)", 1, 10, 2, key="delay",
+                                      help="Pause between scrape calls to avoid rate limiting")
+
+        # Calculate job size
+        total_combos = len(scrape_categories) * len(scrape_states) * len(scrape_years)
+        pending_combos = total_combos
+        if skip_existing:
+            try:
+                from scraper.vahan_http_scraper import get_pending_scrapes
+                pending = get_pending_scrapes(scrape_categories, scrape_states, scrape_years)
+                pending_combos = len(pending)
+            except Exception:
+                pending_combos = total_combos
+
+        st.markdown(
+            f"**Job size:** {total_combos} total combinations "
+            f"({'**' + str(pending_combos) + ' pending**' if skip_existing else 'all will be scraped'})"
+        )
+
+        if pending_combos > 100:
+            est_minutes = (pending_combos * (delay_between + 3)) / 60
+            st.caption(f"Estimated time: ~{est_minutes:.0f} minutes at {delay_between}s delay")
+
+        st.divider()
+
+        # ── Start Scraping (launches background process) ──
+        if st.button("Start Scraping", type="primary", disabled=(pending_combos == 0)):
+            import subprocess
+
+            cmd = [
+                sys.executable, "-m", "scraper.run_background",
+                "--categories", *scrape_categories,
+                "--years", *[str(y) for y in scrape_years],
+                "--states", *scrape_states,
+                "--delay", str(delay_between),
+            ]
+            if not skip_existing:
+                cmd.append("--rescrape")
+
+            # Launch detached background process
+            try:
+                # On Windows, CREATE_NEW_PROCESS_GROUP + DETACHED_PROCESS
+                # ensures the process survives if Streamlit exits.
+                import platform
+                if platform.system() == "Windows":
+                    CREATE_NEW_PROCESS_GROUP = 0x00000200
+                    DETACHED_PROCESS = 0x00000008
+                    subprocess.Popen(
+                        cmd,
+                        creationflags=CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                    )
+                else:
+                    subprocess.Popen(
+                        cmd,
+                        start_new_session=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                    )
+                st.success("Background scraper launched! This page will auto-refresh to show progress.")
+                import time; time.sleep(3)
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed to start scraper: {str(e)}")
 
     st.divider()
 
-    # ── Scrape History ──
+    # ── Scrape History (always visible) ──
     st.markdown("### Scrape History")
     scrape_log = get_scrape_log_summary()
     if not scrape_log.empty:
-        # Summary stats
         success_log = scrape_log[scrape_log["status"] == "success"]
         failed_log = scrape_log[scrape_log["status"] == "failed"]
 
@@ -261,10 +287,22 @@ with tab2:
         with col3:
             st.metric("Total Rows Scraped", format_units(success_log["total_rows"].sum()) if not success_log.empty else "0")
 
+        # Category-level breakdown
+        if not success_log.empty:
+            with st.expander("Progress by Category"):
+                cat_summary = success_log.groupby("category_code").agg(
+                    states=("state", "nunique"),
+                    years=("year", "nunique"),
+                    rows=("total_rows", "sum"),
+                ).reset_index()
+                cat_summary.columns = ["Category", "States Done", "Years Done", "Total Rows"]
+                cat_summary["Total Rows"] = cat_summary["Total Rows"].apply(format_units)
+                st.dataframe(cat_summary, use_container_width=True, hide_index=True)
+
         with st.expander("Full Scrape Log"):
             st.dataframe(scrape_log, use_container_width=True, hide_index=True)
     else:
-        st.info("No scrape history yet. Run the scraper above to populate state-level data.")
+        st.info("No scrape history yet. Configure and start the scraper above.")
 
 # ── Tab 3: Data Status ──
 with tab3:
