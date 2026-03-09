@@ -1,3 +1,0 @@
-# Chromium and related libs are only needed for the scraper,
-# which runs locally (Vahan portal blocks cloud IPs).
-# Removed: chromium, chromium-driver, libgconf-2-4, libappindicator3-1, etc.
