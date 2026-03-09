@@ -6,6 +6,7 @@ NOTE: The Vahan portal (a Government of India website) often blocks cloud/
 datacenter IPs. This scraper works best when run from a local machine or
 residential IP. On Streamlit Cloud, the connection will likely be rejected.
 """
+import html as _html
 import re
 import ssl
 import time
@@ -209,7 +210,7 @@ class VahanHttpScraper:
             )
             matches = re.findall(pattern, html)
             if matches:
-                label_map = {label.strip(): value for _, value, label in matches}
+                label_map = {_html.unescape(label.strip()): value for _, value, label in matches}
                 self._checkbox_options[panel_name] = label_map
                 logger.info(f"Discovered {len(label_map)} options for {panel_name}")
             else:
@@ -378,13 +379,15 @@ class VahanHttpScraper:
         submitted as part of the form data, not toggled individually.
 
         Panel name mapping:
-            config key "vehicle_class"    → form element "VhClass"
-            config key "vehicle_category" → form element "VhCatg"
-            config key "fuel"             → form element "fuel"
+            config key "vehicle_class" → form element "VhClass"
+            config key "fuel"          → form element "fuel"
+
+        NOTE: "VhCatg" does NOT exist as a SelectManyCheckbox on the Vahan
+        portal — only VhClass, fuel, and norms panels are available.  All
+        category filtering must use vehicle_class (VhClass) values.
         """
         PANEL_MAP = {
             "vehicle_class": "VhClass",
-            "vehicle_category": "VhCatg",
             "fuel": "fuel",
         }
 

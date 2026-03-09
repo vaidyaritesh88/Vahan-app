@@ -72,6 +72,16 @@ WEEKLY_SHEET_TO_CATEGORY = {
 }
 
 # Vahan scraping filter definitions
+#
+# IMPORTANT: The Vahan portal exposes only THREE SelectManyCheckbox panels:
+#   VhClass (76 vehicle-class options), fuel (36 fuel-type options), norms.
+#   There is NO "VhCatg" (vehicle-category) checkbox panel — it only exists
+#   as an AJAX update container.  ALL filters must use vehicle_class (→ VhClass)
+#   and/or fuel.
+#
+# LCV and MHCV are NOT scrapable because VhClass has a single "GOODS CARRIER"
+# entry that covers both light and heavy goods vehicles — they cannot be split.
+# State-level LCV/MHCV data must come from the Excel tracker instead.
 VAHAN_SCRAPE_CONFIGS = {
     "PV": {
         "vehicle_class": ["MOTOR CAB", "MOTOR CAR"],
@@ -79,12 +89,21 @@ VAHAN_SCRAPE_CONFIGS = {
         "x_axis": "Month Wise",
     },
     "2W": {
-        "vehicle_category": ["TWO WHEELER (Invalid Carriage)", "TWO WHEELER(NT)", "TWO WHEELER(T)"],
+        "vehicle_class": [
+            "M-CYCLE/SCOOTER", "M-CYCLE/SCOOTER-WITH SIDE CAR", "MOPED",
+            "MOTORISED CYCLE (CC > 25CC)",
+            "MOTOR CYCLE/SCOOTER-SIDECAR(T)",
+            "MOTOR CYCLE/SCOOTER-WITH TRAILER",
+            "MOTOR CYCLE/SCOOTER-USED FOR HIRE",
+        ],
         "y_axis": "Maker",
         "x_axis": "Month Wise",
     },
     "3W": {
-        "vehicle_class": ["THREE WHEELER (GOODS)", "THREE WHEELER (PASSENGER)"],
+        "vehicle_class": [
+            "THREE WHEELER (GOODS)", "THREE WHEELER (PASSENGER)",
+            "THREE WHEELER (PERSONAL)", "E-RICKSHAW WITH CART (G)", "E-RICKSHAW(P)",
+        ],
         "y_axis": "Maker",
         "x_axis": "Month Wise",
     },
@@ -100,13 +119,22 @@ VAHAN_SCRAPE_CONFIGS = {
         "x_axis": "Month Wise",
     },
     "EV_2W": {
-        "vehicle_category": ["TWO WHEELER (Invalid Carriage)", "TWO WHEELER(NT)", "TWO WHEELER(T)"],
+        "vehicle_class": [
+            "M-CYCLE/SCOOTER", "M-CYCLE/SCOOTER-WITH SIDE CAR", "MOPED",
+            "MOTORISED CYCLE (CC > 25CC)",
+            "MOTOR CYCLE/SCOOTER-SIDECAR(T)",
+            "MOTOR CYCLE/SCOOTER-WITH TRAILER",
+            "MOTOR CYCLE/SCOOTER-USED FOR HIRE",
+        ],
         "fuel": ["ELECTRIC(BOV)", "PURE EV"],
         "y_axis": "Maker",
         "x_axis": "Month Wise",
     },
     "EV_3W": {
-        "vehicle_class": ["THREE WHEELER (GOODS)", "THREE WHEELER (PASSENGER)"],
+        "vehicle_class": [
+            "THREE WHEELER (GOODS)", "THREE WHEELER (PASSENGER)",
+            "THREE WHEELER (PERSONAL)", "E-RICKSHAW WITH CART (G)", "E-RICKSHAW(P)",
+        ],
         "fuel": ["ELECTRIC(BOV)", "PURE EV"],
         "y_axis": "Maker",
         "x_axis": "Month Wise",
@@ -120,19 +148,6 @@ VAHAN_SCRAPE_CONFIGS = {
     "PV_HYBRID": {
         "vehicle_class": ["MOTOR CAB", "MOTOR CAR"],
         "fuel": ["PLUG-IN HYBRID EV", "STRONG HYBRID EV"],
-        "y_axis": "Maker",
-        "x_axis": "Month Wise",
-    },
-    "LCV": {
-        "vehicle_category": ["LIGHT GOODS VEHICLE"],
-        "y_axis": "Maker",
-        "x_axis": "Month Wise",
-    },
-    "MHCV": {
-        "vehicle_category": [
-            "HEAVY GOODS VEHICLE", "HEAVY PASSENGER VEHICLE",
-            "MEDIUM GOODS VEHICLE", "MEDIUM PASSENGER VEHICLE",
-        ],
         "y_axis": "Maker",
         "x_axis": "Month Wise",
     },

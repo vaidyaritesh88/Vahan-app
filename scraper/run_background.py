@@ -206,7 +206,7 @@ def main():
     parser = argparse.ArgumentParser(description="Vahan background scraper")
     parser.add_argument(
         "--categories", nargs="+",
-        default=["2W", "PV", "3W", "LCV", "MHCV", "EV_2W", "EV_PV", "EV_3W", "TRACTORS"],
+        default=["2W", "PV", "3W", "EV_2W", "EV_PV", "EV_3W", "TRACTORS"],
         help="Category codes to scrape",
     )
     parser.add_argument(

@@ -166,7 +166,7 @@ with tab2:
         st.divider()
         st.markdown("### Configure Scrape Job")
 
-        key_categories = ["2W", "PV", "3W", "LCV", "MHCV", "EV_2W", "EV_PV", "EV_3W", "TRACTORS"]
+        key_categories = ["2W", "PV", "3W", "EV_2W", "EV_PV", "EV_3W", "TRACTORS"]
         key_states = [
             "Maharashtra", "Tamil Nadu", "Karnataka", "Gujarat", "Uttar Pradesh",
             "Rajasthan", "Delhi", "Haryana", "Kerala", "Madhya Pradesh",
