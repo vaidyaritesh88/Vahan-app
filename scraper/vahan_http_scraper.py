@@ -622,14 +622,29 @@ class VahanHttpScraper:
 
         Used to save headers from the first page for reuse with pagination
         responses that may not include <thead>.
+
+        Handles multi-row <thead> (Vahan portal uses 2 rows):
+          Row 0: [S No, <Y-axis label>, <X-axis group label>, TOTAL]
+          Row 1: [JAN, FEB, ..., DEC]
+        Reconstructs as: row0[:2] + row1 + [row0[-1]]
         """
         cdata_blocks = re.findall(r'<!\[CDATA\[(.*?)\]\]>', html, re.DOTALL)
         search_text = " ".join(cdata_blocks) if cdata_blocks else html
         thead_match = re.search(r'<thead[^>]*>(.*?)</thead>', search_text, re.DOTALL)
-        if thead_match:
+        if not thead_match:
+            return []
+
+        header_rows = re.findall(r'<tr[^>]*>(.*?)</tr>', thead_match.group(1), re.DOTALL)
+        if len(header_rows) >= 2:
+            def _th(row_html):
+                cells = re.findall(r'<(?:th|span)[^>]*>([^<]*)</(?:th|span)>', row_html)
+                return [c.strip() for c in cells if c.strip()]
+            row0 = _th(header_rows[0])
+            row1 = _th(header_rows[1])
+            return row0[:2] + row1 + [row0[-1]] if len(row0) >= 3 else row0 + row1
+        else:
             headers = re.findall(r'<(?:th|span)[^>]*>([^<]*)</(?:th|span)>', thead_match.group(1))
             return [h.strip() for h in headers if h.strip()]
-        return []
 
     def _find_datatable_id(self, html):
         """Find the PrimeFaces DataTable widget ID from response HTML.
@@ -1070,12 +1085,30 @@ class VahanHttpScraper:
         else:
             table_html = table_match.group(1)
 
-        # Extract headers
+        # Extract headers — handle multi-row <thead>.
+        # Vahan portal uses 2 header rows:
+        #   Row 0: [S No, <Y-axis label>, <X-axis group label>, TOTAL]
+        #   Row 1: [JAN, FEB, ..., DEC]  (individual period headers)
+        # The X-axis group label (e.g. "Month Wise") has NO data column,
+        # so we reconstruct: row0[:2] + row1 + [row0[-1]]
         headers = []
         thead_match = re.search(r'<thead[^>]*>(.*?)</thead>', table_html, re.DOTALL)
         if thead_match:
-            headers = re.findall(r'<(?:th|span)[^>]*>([^<]*)</(?:th|span)>', thead_match.group(1))
-            headers = [h.strip() for h in headers if h.strip()]
+            header_rows = re.findall(r'<tr[^>]*>(.*?)</tr>', thead_match.group(1), re.DOTALL)
+            if len(header_rows) >= 2:
+                # Multi-row header: reconstruct properly
+                def _extract_th(row_html):
+                    cells = re.findall(r'<(?:th|span)[^>]*>([^<]*)</(?:th|span)>', row_html)
+                    return [c.strip() for c in cells if c.strip()]
+                row0 = _extract_th(header_rows[0])
+                row1 = _extract_th(header_rows[1])
+                # row0[:2] = [S No, Y-axis label], row1 = months, row0[-1] = TOTAL
+                headers = row0[:2] + row1 + [row0[-1]] if len(row0) >= 3 else row0 + row1
+                logger.debug(f"Multi-row header reconstructed: {len(row0)} + {len(row1)} -> {len(headers)} headers")
+            else:
+                # Single-row header: use as-is
+                headers = re.findall(r'<(?:th|span)[^>]*>([^<]*)</(?:th|span)>', thead_match.group(1))
+                headers = [h.strip() for h in headers if h.strip()]
 
         # Fallback: use saved_headers from first page if no <thead> found
         if not headers and saved_headers:
