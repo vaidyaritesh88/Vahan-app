@@ -173,15 +173,31 @@ with tab2:
             "Andhra Pradesh", "Telangana", "West Bengal", "Punjab", "Bihar",
         ]
 
+        all_categories = list(VAHAN_SCRAPE_CONFIGS.keys())
+
+        def _toggle_all_cats():
+            if st.session_state.all_cats:
+                st.session_state.scrape_cats = all_categories
+            else:
+                st.session_state.scrape_cats = key_categories
+
+        def _toggle_all_states():
+            if st.session_state.all_states:
+                st.session_state.scrape_states = list(ALL_STATES)
+            else:
+                st.session_state.scrape_states = key_states
+
         col1, col2 = st.columns(2)
         with col1:
+            st.checkbox("Select all", key="all_cats", on_change=_toggle_all_cats)
             scrape_categories = st.multiselect(
                 "Categories to scrape",
-                list(VAHAN_SCRAPE_CONFIGS.keys()),
+                all_categories,
                 default=key_categories,
                 key="scrape_cats",
             )
         with col2:
+            st.checkbox("Select all", key="all_states", on_change=_toggle_all_states)
             scrape_states = st.multiselect(
                 "States to scrape",
                 ALL_STATES,

@@ -71,6 +71,48 @@ WEEKLY_SHEET_TO_CATEGORY = {
     "Electric PV Weekly trends": "EV_PV",
 }
 
+# Mapping from Vahan portal VhClass labels -> our category codes.
+# Used when scraping with Y-axis="Vehicle Class" to compute category totals.
+# Labels not listed here are ignored (e.g. AMBULANCE, ADAPTED VEHICLE).
+VHCLASS_TO_CATEGORY = {
+    # PV
+    "MOTOR CAR": "PV",
+    "MOTOR CAB": "PV",
+    # 2W
+    "M-CYCLE/SCOOTER": "2W",
+    "M-CYCLE/SCOOTER-WITH SIDE CAR": "2W",
+    "MOPED": "2W",
+    "MOTORISED CYCLE (CC > 25CC)": "2W",
+    "MOTOR CYCLE/SCOOTER-SIDECAR(T)": "2W",
+    "MOTOR CYCLE/SCOOTER-WITH TRAILER": "2W",
+    "MOTOR CYCLE/SCOOTER-USED FOR HIRE": "2W",
+    # 3W
+    "THREE WHEELER (GOODS)": "3W",
+    "THREE WHEELER (PASSENGER)": "3W",
+    "THREE WHEELER (PERSONAL)": "3W",
+    "E-RICKSHAW WITH CART (G)": "3W",
+    "E-RICKSHAW(P)": "3W",
+    # CV
+    "GOODS CARRIER": "CV",
+    "BUS": "CV",
+    "MAXI CAB": "CV",
+    # Tractors
+    "AGRICULTURAL TRACTOR": "TRACTORS",
+    "TRACTOR (COMMERCIAL)": "TRACTORS",
+}
+
+# Mapping from Vahan portal fuel labels -> our fuel-based sub-category codes.
+# Used when scraping with Y-axis="Fuel" to compute EV/CNG/Hybrid totals.
+FUEL_TO_SUBCATEGORY = {
+    "PURE EV": "EV",
+    "ELECTRIC(BOV)": "EV",
+    "CNG ONLY": "CNG",
+    "PETROL/CNG": "CNG",
+    "PETROL(E20)/CNG": "CNG",
+    "PLUG-IN HYBRID EV": "HYBRID",
+    "STRONG HYBRID EV": "HYBRID",
+}
+
 # Vahan scraping filter definitions
 #
 # IMPORTANT: The Vahan portal exposes only THREE SelectManyCheckbox panels:

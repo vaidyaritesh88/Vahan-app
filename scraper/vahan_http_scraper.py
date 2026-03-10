@@ -16,7 +16,10 @@ import requests
 from datetime import datetime
 from requests.adapters import HTTPAdapter
 
-from config.settings import VAHAN_URL, VAHAN_SCRAPE_CONFIGS
+from config.settings import (
+    VAHAN_URL, VAHAN_SCRAPE_CONFIGS,
+    VHCLASS_TO_CATEGORY, FUEL_TO_SUBCATEGORY,
+)
 from config.oem_normalization import normalize_oem
 from database.schema import get_connection
 
@@ -362,10 +365,9 @@ class VahanHttpScraper:
         )
         time.sleep(0.5)
 
-        # 7. Resolve checkbox filter labels → form values (no AJAX needed).
-        # Values are stored in self._checkbox_values for inclusion in
-        # the refresh POST (see _find_and_click_refresh).
-        self._set_checkbox_filters(config)
+        # 7. Checkbox filters removed — Vahan portal ignores VhClass/fuel
+        # checkbox POST values (refresh button has no PrimeFaces 'p' param).
+        # Category filtering is now done via Y-axis mapping instead.
 
     def _set_checkbox_filters(self, config):
         """Resolve checkbox filter labels to form values.
@@ -447,16 +449,12 @@ class VahanHttpScraper:
         if self._state_id:
             form_data[f"{self._state_id}_input"] = state_code
 
-        # Add checkbox filter values (resolved by _set_checkbox_filters).
-        # PrimeFaces SelectManyCheckbox uses repeated params for multi-select.
-        checkbox_values = getattr(self, "_checkbox_values", {})
-        for panel_name, values in checkbox_values.items():
-            if values:
-                form_data[panel_name] = values  # list → repeated params
-                logger.info(f"Including {panel_name}={values} in refresh POST")
+        # NOTE: Checkbox filters (VhClass, fuel) are NOT included — the Vahan
+        # portal's refresh button PrimeFaces config has no 'p' (process) param,
+        # so the server ignores checkbox POST values entirely.
 
-        # Try common refresh button IDs
-        for btn_id in ["j_idt61", "j_idt59", "j_idt57", "j_idt63", "j_idt65"]:
+        # Try known refresh button IDs
+        for btn_id in ["j_idt84", "j_idt93", "j_idt103", "j_idt61", "j_idt59"]:
             try:
                 resp = self._button_post(btn_id, form_data)
                 if self._has_data_table(resp):
@@ -1246,6 +1244,240 @@ class VahanHttpScraper:
         conn.commit()
         return rows
 
+
+    # -- New Y-axis based scraping methods ------------------------------------
+    # These replace the old category-specific checkbox approach.
+    # Instead of filtering by VhClass checkboxes (which the server ignores),
+    # we set Y-axis to "Vehicle Class" or "Fuel" and map the returned labels
+    # to our category codes.
+
+    def _scrape_raw(self, state_name, year, y_axis='Maker', x_axis='Month Wise'):
+        """Core scrape: set filters, click refresh, extract all table data.
+
+        Returns list of dicts: [{oem_raw, month_label, volume}, ...]
+        where oem_raw is the first column label (depends on y_axis).
+        """
+        state_code = STATE_CODES.get(state_name)
+        if not state_code:
+            raise ValueError(f'Unknown state: {state_name}. '
+                             f'Available: {list(STATE_CODES.keys())}')
+
+        config = {'y_axis': y_axis, 'x_axis': x_axis}
+
+        # Reset and reload page for fresh session state
+        self._page_loaded = False
+        self._load_page()
+
+        # Set all dropdown filters (no checkbox filters needed)
+        self._set_filters(state_code, year, config)
+
+        # Click refresh and get first page of data
+        response_html = self._find_and_click_refresh(state_code, year, config)
+
+        # Parse first page
+        first_page = self._extract_table(response_html)
+        logger.info(f'_scrape_raw({y_axis}, {state_name}, {year}): '
+                    f'first page {len(first_page)} records')
+
+        # Fetch all pages (handles pagination)
+        all_records = self._fetch_all_datatable_rows(response_html, first_page)
+        logger.info(f'_scrape_raw({y_axis}, {state_name}, {year}): '
+                    f'total {len(all_records)} records')
+        return all_records
+
+    def scrape_category_totals(self, state_name, year):
+        """Scrape with Y-axis=Vehicle Class and map to category codes.
+
+        Returns list of dicts: [{category_code, month_label, volume}, ...]
+        Vehicle class labels are mapped using VHCLASS_TO_CATEGORY.
+        Volumes for vehicle classes in the same category are summed.
+        """
+        from collections import defaultdict
+
+        records = self._scrape_raw(state_name, year, y_axis='Vehicle Class')
+
+        totals = defaultdict(lambda: defaultdict(int))
+        unmapped = set()
+
+        for rec in records:
+            vclass = rec['oem_raw'].strip().upper()
+            cat_code = VHCLASS_TO_CATEGORY.get(vclass)
+            if cat_code:
+                totals[cat_code][rec['month_label']] += rec['volume']
+            else:
+                unmapped.add(vclass)
+
+        if unmapped:
+            logger.info(f'Unmapped vehicle classes (ignored): {unmapped}')
+
+        result = []
+        for cat_code, months in totals.items():
+            for month_label, volume in months.items():
+                result.append({
+                    'category_code': cat_code,
+                    'month_label': month_label,
+                    'volume': volume,
+                })
+
+        cats_found = set(r['category_code'] for r in result)
+        logger.info(f'Category totals for {state_name}/{year}: '
+                    f'{len(result)} records, categories: {cats_found}')
+        return result
+
+    def scrape_fuel_totals(self, state_name, year):
+        """Scrape with Y-axis=Fuel and map to fuel subcategories.
+
+        Returns list of dicts: [{subcategory, month_label, volume}, ...]
+        Note: cross-category totals (EV = EV_PV + EV_2W + EV_3W).
+        """
+        from collections import defaultdict
+
+        records = self._scrape_raw(state_name, year, y_axis='Fuel')
+
+        totals = defaultdict(lambda: defaultdict(int))
+        unmapped = set()
+
+        for rec in records:
+            fuel_type = rec['oem_raw'].strip().upper()
+            subcat = FUEL_TO_SUBCATEGORY.get(fuel_type)
+            if subcat:
+                totals[subcat][rec['month_label']] += rec['volume']
+            else:
+                unmapped.add(fuel_type)
+
+        if unmapped:
+            logger.debug(f'Unmapped fuel types (ignored): {unmapped}')
+
+        result = []
+        for subcat, months in totals.items():
+            for month_label, volume in months.items():
+                result.append({
+                    'subcategory': subcat,
+                    'month_label': month_label,
+                    'volume': volume,
+                })
+
+        subcats_found = set(r['subcategory'] for r in result)
+        logger.info(f'Fuel totals for {state_name}/{year}: '
+                    f'{len(result)} records, subcategories: {subcats_found}')
+        return result
+
+    def _store_category_totals(self, conn, records, state_name, year):
+        """Store category total records into state_monthly.
+
+        Uses oem_name='__TOTAL__' to distinguish from OEM-specific records.
+        """
+        cursor = conn.cursor()
+        rows = 0
+        for rec in records:
+            month_num = _parse_month(rec['month_label'])
+            if month_num is None:
+                continue
+            cursor.execute(
+                "INSERT INTO state_monthly"
+                "    (category_code, oem_name, state, year, month, volume)"
+                " VALUES (?, '__TOTAL__', ?, ?, ?, ?)"
+                " ON CONFLICT(category_code, oem_name, state, year, month)"
+                " DO UPDATE SET volume=excluded.volume,"
+                "              updated_at=CURRENT_TIMESTAMP",
+                (rec['category_code'], state_name, year, month_num,
+                 rec['volume']))
+            rows += 1
+        conn.commit()
+        logger.info(f'Stored {rows} category total records for {state_name}/{year}')
+        return rows
+
+    def _store_fuel_totals(self, conn, records, state_name, year):
+        """Store fuel subcategory totals into state_monthly.
+
+        Uses category_code='__EV__'/'__CNG__'/'__HYBRID__' and
+        oem_name='__TOTAL__'.
+        """
+        FUEL_CAT_MAP = {'EV': '__EV__', 'CNG': '__CNG__', 'HYBRID': '__HYBRID__'}
+        cursor = conn.cursor()
+        rows = 0
+        for rec in records:
+            month_num = _parse_month(rec['month_label'])
+            if month_num is None:
+                continue
+            cat_code = FUEL_CAT_MAP.get(rec['subcategory'], rec['subcategory'])
+            cursor.execute(
+                "INSERT INTO state_monthly"
+                "    (category_code, oem_name, state, year, month, volume)"
+                " VALUES (?, '__TOTAL__', ?, ?, ?, ?)"
+                " ON CONFLICT(category_code, oem_name, state, year, month)"
+                " DO UPDATE SET volume=excluded.volume,"
+                "              updated_at=CURRENT_TIMESTAMP",
+                (cat_code, state_name, year, month_num, rec['volume']))
+            rows += 1
+        conn.commit()
+        logger.info(f'Stored {rows} fuel total records for {state_name}/{year}')
+        return rows
+
+    def scrape_and_store_state(self, state_name, year,
+                               modes=('category', 'fuel')):
+        """Scrape a state/year with multiple Y-axes and store all results.
+
+        modes:
+            'category' - Y-axis=Vehicle Class -> PV/2W/3W/CV/TRACTORS totals
+            'fuel'     - Y-axis=Fuel -> EV/CNG/HYBRID totals
+            'maker'    - Y-axis=Maker -> OEM totals (all categories combined)
+
+        Returns total rows upserted.
+        """
+        conn = get_connection()
+        cursor = conn.cursor()
+        total_rows = 0
+
+        mode_configs = [
+            ('category', '__CAT_TOTALS__',
+             lambda: self.scrape_category_totals(state_name, year),
+             lambda recs: self._store_category_totals(conn, recs, state_name, year)),
+            ('fuel', '__FUEL_TOTALS__',
+             lambda: self.scrape_fuel_totals(state_name, year),
+             lambda recs: self._store_fuel_totals(conn, recs, state_name, year)),
+            ('maker', '__ALL__',
+             lambda: self._scrape_raw(state_name, year, y_axis='Maker'),
+             lambda recs: self._store_records(conn, recs, '__ALL__', state_name, year)),
+        ]
+
+        try:
+            for mode_name, log_cat, scrape_fn, store_fn in mode_configs:
+                if mode_name not in modes:
+                    continue
+
+                cursor.execute(
+                    "INSERT INTO scrape_log "
+                    "(category_code, state, year, status, started_at) "
+                    "VALUES (?, ?, ?, 'running', ?)",
+                    (log_cat, state_name, year, datetime.now().isoformat()))
+                log_id = cursor.lastrowid
+                conn.commit()
+
+                try:
+                    records = scrape_fn()
+                    rows = store_fn(records)
+                    total_rows += rows
+                    cursor.execute(
+                        "UPDATE scrape_log SET status='success', "
+                        "completed_at=?, rows_inserted=? WHERE id=?",
+                        (datetime.now().isoformat(), rows, log_id))
+                    conn.commit()
+                except Exception as e:
+                    cursor.execute(
+                        "UPDATE scrape_log SET status='failed', "
+                        "completed_at=?, error_message=? WHERE id=?",
+                        (datetime.now().isoformat(), str(e)[:500], log_id))
+                    conn.commit()
+                    raise
+
+                time.sleep(2)
+
+            return total_rows
+
+        finally:
+            conn.close()
+
     def test_connection(self):
         """Test if Vahan portal is reachable. Returns (success, message).
 
@@ -1386,4 +1618,28 @@ def get_pending_scrapes(categories, states, years):
             for year in years:
                 if (cat, state, year) not in coverage:
                     pending.append((cat, state, year))
+    return pending
+
+
+def get_pending_state_scrapes(states, years, modes=('category', 'fuel')):
+    """Return (state, year) pairs not yet successfully scraped.
+
+    Checks scrape_log for '__CAT_TOTALS__' and '__FUEL_TOTALS__' entries.
+    """
+    coverage = get_scrape_coverage()
+    pending = []
+    for state in states:
+        for year in years:
+            needs_scrape = False
+            if 'category' in modes:
+                if ('__CAT_TOTALS__', state, year) not in coverage:
+                    needs_scrape = True
+            if 'fuel' in modes:
+                if ('__FUEL_TOTALS__', state, year) not in coverage:
+                    needs_scrape = True
+            if 'maker' in modes:
+                if ('__ALL__', state, year) not in coverage:
+                    needs_scrape = True
+            if needs_scrape:
+                pending.append((state, year))
     return pending

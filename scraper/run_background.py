@@ -1,9 +1,12 @@
-"""Background scraper process — runs independently of Streamlit.
+"""Background scraper process -- runs independently of Streamlit.
 
-Usage:
-    python -m scraper.run_background                    # scrape with defaults
-    python -m scraper.run_background --categories PV 2W # specific categories
-    python -m scraper.run_background --years 2025 2026  # specific years
+Usage (new Y-axis approach -- default):
+    python -m scraper.run_background                     # scrape all states/years
+    python -m scraper.run_background --years 2025 2026   # specific years
+    python -m scraper.run_background --modes category fuel maker  # specific modes
+
+Usage (legacy per-category approach):
+    python -m scraper.run_background --legacy --categories PV 2W
 
 Control:
     Stop gracefully by writing {"status": "stopping"} to data/.scraper_control.json,
@@ -82,11 +85,9 @@ def is_scraper_running():
     pid = ctrl.get("pid")
     if pid:
         try:
-            # On Windows, os.kill with signal 0 checks existence
             os.kill(pid, 0)
             return True, ctrl
         except (OSError, ProcessLookupError):
-            # Process died — stale control file
             _cleanup_control()
             return False, None
 
@@ -102,11 +103,17 @@ def request_stop():
     return False
 
 
-def run(categories, states, years, delay=2, skip_existing=True):
-    """Main background scrape loop."""
-    from scraper.vahan_http_scraper import VahanHttpScraper, get_pending_scrapes
+def run_state_scrape(states, years, modes=("category", "fuel"),
+                     delay=2, skip_existing=True):
+    """New Y-axis based scrape loop: iterate over (state, year) pairs.
 
-    # Check if already running
+    Each state/year combo does 1-3 scrapes (Vehicle Class, Fuel, Maker)
+    instead of the old approach of 7+ category-specific scrapes.
+    """
+    from scraper.vahan_http_scraper import (
+        VahanHttpScraper, get_pending_state_scrapes,
+    )
+
     running, info = is_scraper_running()
     if running:
         print(f"Scraper already running (PID {info.get('pid')}). Stop it first.")
@@ -114,25 +121,114 @@ def run(categories, states, years, delay=2, skip_existing=True):
 
     # Determine jobs
     if skip_existing:
+        jobs = get_pending_state_scrapes(states, years, modes)
+    else:
+        jobs = [(s, y) for s in states for y in years]
+
+    if not jobs:
+        print("Nothing to scrape -- all state/year combinations already done.")
+        return
+
+    total = len(jobs)
+    mode_str = "+".join(modes)
+    print(f"Starting state scrape: {total} state/year combinations")
+    print(f"Modes: {mode_str}")
+    print(f"States: {len(states)} states")
+    print(f"Years: {years}")
+    print(f"Delay: {delay}s between scrapes")
+    print(f"PID: {os.getpid()}")
+    print("-" * 60)
+
+    _write_control("running", extra={
+        "total_jobs": total,
+        "modes": list(modes),
+        "years": list(years),
+        "states_count": len(states),
+        "delay": delay,
+        "started_at": datetime.now().isoformat(),
+    })
+
+    scraper = None
+    success = 0
+    failed = 0
+    total_rows = 0
+
+    try:
+        scraper = VahanHttpScraper()
+
+        for i, (state, year) in enumerate(jobs):
+            if _should_stop():
+                print(f"\nStop requested. Completed {success + failed}/{total}.")
+                break
+
+            label = f"[{i+1}/{total}] {state} / {year} ({mode_str})"
+            print(f"{label} ...", end=" ", flush=True)
+
+            try:
+                rows = scraper.scrape_and_store_state(
+                    state, year, modes=modes)
+                total_rows += rows
+                success += 1
+                print(f"OK ({rows} rows)")
+            except Exception as e:
+                failed += 1
+                print(f"FAILED: {str(e)[:80]}")
+
+            _write_control("running", extra={
+                "total_jobs": total,
+                "completed": success + failed,
+                "success": success,
+                "failed": failed,
+                "total_rows": total_rows,
+                "current_job": label,
+                "modes": list(modes),
+                "years": list(years),
+                "states_count": len(states),
+                "delay": delay,
+                "started_at": _read_control().get("started_at", ""),
+            })
+
+            if i < total - 1:
+                time.sleep(delay)
+
+    except KeyboardInterrupt:
+        print("\n\nKeyboard interrupt -- stopping gracefully.")
+    except Exception as e:
+        print(f"\n\nFatal error: {e}")
+    finally:
+        _cleanup_control()
+
+    print(f"\nDone! {success} succeeded, {failed} failed, "
+          f"{total_rows:,} rows upserted.")
+
+
+def run(categories, states, years, delay=2, skip_existing=True):
+    """Legacy per-category scrape loop (kept for backward compatibility)."""
+    from scraper.vahan_http_scraper import VahanHttpScraper, get_pending_scrapes
+
+    running, info = is_scraper_running()
+    if running:
+        print(f"Scraper already running (PID {info.get('pid')}). Stop it first.")
+        sys.exit(1)
+
+    if skip_existing:
         jobs = get_pending_scrapes(categories, states, years)
     else:
         jobs = [(c, s, y) for c in categories for s in states for y in years]
 
     if not jobs:
-        print("Nothing to scrape — all combinations already done.")
+        print("Nothing to scrape -- all combinations already done.")
         return
 
     total = len(jobs)
-    print(f"Starting background scrape: {total} combinations")
+    print(f"Starting legacy scrape: {total} combinations")
     print(f"Categories: {categories}")
     print(f"States: {len(states)} states")
     print(f"Years: {years}")
     print(f"Delay: {delay}s between requests")
-    print(f"Control file: {CONTROL_FILE}")
     print(f"PID: {os.getpid()}")
     print("-" * 60)
 
-    # Write control file
     _write_control("running", extra={
         "total_jobs": total,
         "categories": categories,
@@ -151,9 +247,8 @@ def run(categories, states, years, delay=2, skip_existing=True):
         scraper = VahanHttpScraper()
 
         for i, (cat, state, year) in enumerate(jobs):
-            # Check stop signal
             if _should_stop():
-                print(f"\nStop requested. Completed {success + failed}/{total} jobs.")
+                print(f"\nStop requested. Completed {success + failed}/{total}.")
                 break
 
             label = f"[{i+1}/{total}] {cat} / {state} / {year}"
@@ -168,7 +263,6 @@ def run(categories, states, years, delay=2, skip_existing=True):
                 failed += 1
                 print(f"FAILED: {str(e)[:80]}")
 
-            # Update control file with progress
             _write_control("running", extra={
                 "total_jobs": total,
                 "completed": success + failed,
@@ -183,31 +277,31 @@ def run(categories, states, years, delay=2, skip_existing=True):
                 "started_at": _read_control().get("started_at", ""),
             })
 
-            if i < total - 1:  # don't sleep after last job
+            if i < total - 1:
                 time.sleep(delay)
 
-        # Aggregate if we scraped anything
         if success > 0:
-            print("\nAggregating state data → national totals...")
+            print("\nAggregating state data to national totals...")
             agg = aggregate_state_to_national()
             print(f"Aggregated {agg:,} national records.")
 
     except KeyboardInterrupt:
-        print("\n\nKeyboard interrupt — stopping gracefully.")
+        print("\n\nKeyboard interrupt -- stopping gracefully.")
     except Exception as e:
         print(f"\n\nFatal error: {e}")
     finally:
         _cleanup_control()
 
-    print(f"\nDone! {success} succeeded, {failed} failed, {total_rows:,} rows upserted.")
+    print(f"\nDone! {success} succeeded, {failed} failed, "
+          f"{total_rows:,} rows upserted.")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Vahan background scraper")
     parser.add_argument(
-        "--categories", nargs="+",
-        default=["2W", "PV", "3W", "EV_2W", "EV_PV", "EV_3W", "TRACTORS"],
-        help="Category codes to scrape",
+        "--modes", nargs="+", default=["category", "fuel"],
+        help="Scrape modes: category (Vehicle Class axis), fuel (Fuel axis), "
+             "maker (Maker axis). Default: category fuel",
     )
     parser.add_argument(
         "--states", nargs="+", default=None,
@@ -217,14 +311,35 @@ def main():
         "--years", nargs="+", type=int, default=list(range(2020, 2027)),
         help="Years to scrape",
     )
-    parser.add_argument("--delay", type=int, default=2, help="Delay between requests (seconds)")
-    parser.add_argument("--all-states", action="store_true", help="Scrape all states/UTs")
-    parser.add_argument("--rescrape", action="store_true", help="Don't skip existing")
-    parser.add_argument("--stop", action="store_true", help="Send stop signal to running scraper")
+    parser.add_argument(
+        "--delay", type=int, default=2,
+        help="Delay between requests (seconds)",
+    )
+    parser.add_argument(
+        "--all-states", action="store_true",
+        help="Scrape all states/UTs",
+    )
+    parser.add_argument(
+        "--rescrape", action="store_true",
+        help="Don't skip existing data",
+    )
+    parser.add_argument(
+        "--stop", action="store_true",
+        help="Send stop signal to running scraper",
+    )
+    # Legacy mode
+    parser.add_argument(
+        "--legacy", action="store_true",
+        help="Use old per-category scraping (broken VhClass filters)",
+    )
+    parser.add_argument(
+        "--categories", nargs="+",
+        default=["2W", "PV", "3W", "EV_2W", "EV_PV", "EV_3W", "TRACTORS"],
+        help="Category codes for legacy mode",
+    )
 
     args = parser.parse_args()
 
-    # Configure logging
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)-8s %(message)s",
@@ -244,27 +359,41 @@ def main():
     elif args.states:
         states = args.states
     else:
-        # Top 15 states by registrations
         states = [
-            "Maharashtra", "Tamil Nadu", "Karnataka", "Gujarat", "Uttar Pradesh",
-            "Rajasthan", "Delhi", "Haryana", "Kerala", "Madhya Pradesh",
-            "Andhra Pradesh", "Telangana", "West Bengal", "Punjab", "Bihar",
+            "Maharashtra", "Tamil Nadu", "Karnataka", "Gujarat",
+            "Uttar Pradesh", "Rajasthan", "Delhi", "Haryana", "Kerala",
+            "Madhya Pradesh", "Andhra Pradesh", "Telangana", "West Bengal",
+            "Punjab", "Bihar",
         ]
 
-    # Validate categories
-    valid = list(VAHAN_SCRAPE_CONFIGS.keys())
-    for cat in args.categories:
-        if cat not in valid:
-            print(f"Invalid category '{cat}'. Valid: {valid}")
-            sys.exit(1)
-
-    run(
-        categories=args.categories,
-        states=states,
-        years=args.years,
-        delay=args.delay,
-        skip_existing=not args.rescrape,
-    )
+    if args.legacy:
+        # Legacy per-category approach
+        valid = list(VAHAN_SCRAPE_CONFIGS.keys())
+        for cat in args.categories:
+            if cat not in valid:
+                print(f"Invalid category '{cat}'. Valid: {valid}")
+                sys.exit(1)
+        run(
+            categories=args.categories,
+            states=states,
+            years=args.years,
+            delay=args.delay,
+            skip_existing=not args.rescrape,
+        )
+    else:
+        # New Y-axis approach (default)
+        valid_modes = ("category", "fuel", "maker")
+        for m in args.modes:
+            if m not in valid_modes:
+                print(f"Invalid mode '{m}'. Valid: {list(valid_modes)}")
+                sys.exit(1)
+        run_state_scrape(
+            states=states,
+            years=args.years,
+            modes=tuple(args.modes),
+            delay=args.delay,
+            skip_existing=not args.rescrape,
+        )
 
 
 if __name__ == "__main__":
