@@ -359,6 +359,7 @@ def get_state_volumes(category_code, year, month):
         SELECT state, SUM(volume) as volume
         FROM state_monthly
         WHERE category_code = ? AND year = ? AND month = ?
+              AND oem_name = '__TOTAL__'
         GROUP BY state
         ORDER BY volume DESC
     """, [category_code, year, month])
@@ -369,7 +370,8 @@ def get_state_oem_breakdown(category_code, state, year, month, top_n=10):
     df = _query_df("""
         SELECT oem_name, volume
         FROM state_monthly
-        WHERE category_code = ? AND state = ? AND year = ? AND month = ? AND volume > 0
+        WHERE category_code = ? AND state = ? AND year = ? AND month = ?
+              AND volume > 0 AND oem_name <> '__TOTAL__'
         ORDER BY volume DESC
     """, [category_code, state, year, month])
 

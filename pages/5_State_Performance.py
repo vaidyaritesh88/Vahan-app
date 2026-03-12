@@ -96,8 +96,10 @@ selected_state = st.selectbox("Select a state for OEM breakdown",
                                state_data["state"].tolist())
 
 if selected_state:
-    oem_data = get_state_oem_breakdown(cat_code, selected_state, year, month, top_n=10)
+    # OEM data uses __ALL__ (Y-axis=Maker) — cross-category by design
+    oem_data = get_state_oem_breakdown("__ALL__", selected_state, year, month, top_n=10)
     if not oem_data.empty:
+        st.caption("OEM volumes are across all vehicle categories (Vahan portal limitation).")
         col1, col2 = st.columns(2)
         with col1:
             fig = horizontal_bar(oem_data, x="volume", y="oem_name",
@@ -114,3 +116,5 @@ if selected_state:
             }),
             use_container_width=True, hide_index=True,
         )
+    else:
+        st.info("No OEM data available. Run the scraper with \'maker\' mode to populate OEM breakdowns.")

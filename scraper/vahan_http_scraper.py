@@ -1152,7 +1152,7 @@ class VahanHttpScraper:
             if oem_idx >= len(cells):
                 continue
 
-            oem_raw = re.sub(r'<[^>]+>', '', cells[oem_idx]).strip()
+            oem_raw = _html.unescape(re.sub(r'<[^>]+>', '', cells[oem_idx]).strip())
             if not oem_raw or oem_raw.upper() in ("TOTAL", "GRAND TOTAL"):
                 continue
 
@@ -1448,7 +1448,7 @@ class VahanHttpScraper:
         return rows
 
     def scrape_and_store_state(self, state_name, year,
-                               modes=('category', 'fuel')):
+                               modes=('category', 'fuel', 'maker')):
         """Scrape a state/year with multiple Y-axes and store all results.
 
         modes:
@@ -1654,10 +1654,10 @@ def get_pending_scrapes(categories, states, years):
     return pending
 
 
-def get_pending_state_scrapes(states, years, modes=('category', 'fuel')):
+def get_pending_state_scrapes(states, years, modes=('category', 'fuel', 'maker')):
     """Return (state, year) pairs not yet successfully scraped.
 
-    Checks scrape_log for '__CAT_TOTALS__' and '__FUEL_TOTALS__' entries.
+    Checks scrape_log for '__CAT_TOTALS__', '__FUEL_TOTALS__', and '__ALL__' entries.
     """
     coverage = get_scrape_coverage()
     pending = []

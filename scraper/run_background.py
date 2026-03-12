@@ -103,7 +103,7 @@ def request_stop():
     return False
 
 
-def run_state_scrape(states, years, modes=("category", "fuel"),
+def run_state_scrape(states, years, modes=("category", "fuel", "maker"),
                      delay=2, skip_existing=True):
     """New Y-axis based scrape loop: iterate over (state, year) pairs.
 
@@ -299,7 +299,7 @@ def run(categories, states, years, delay=2, skip_existing=True):
 def main():
     parser = argparse.ArgumentParser(description="Vahan background scraper")
     parser.add_argument(
-        "--modes", nargs="+", default=["category", "fuel"],
+        "--modes", nargs="+", default=["category", "fuel", "maker"],
         help="Scrape modes: category (Vehicle Class axis), fuel (Fuel axis), "
              "maker (Maker axis). Default: category fuel",
     )
