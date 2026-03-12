@@ -229,9 +229,9 @@ def compute_growth_series(df, vol_col="volume"):
 
 PERIOD_PRESETS = {
     "Last 1Y": 12,
-    "Last 2Y": 24,
     "Last 3Y": 36,
     "Last 5Y": 60,
+    "FYTD": "fytd",
     "All Data": None,
 }
 
@@ -240,7 +240,10 @@ def get_period_months(preset_name, latest_year, latest_month):
     """Given a preset name and latest available month, return (start_date, end_date)."""
     end_date = pd.Timestamp(latest_year, latest_month, 1)
     n_months = PERIOD_PRESETS.get(preset_name)
-    if n_months is None:
+    if n_months == "fytd":
+        fy_start_year = latest_year if latest_month >= 4 else latest_year - 1
+        start_date = pd.Timestamp(fy_start_year, 4, 1)
+    elif n_months is None:
         start_date = pd.Timestamp(2019, 1, 1)
     else:
         start_date = end_date - pd.DateOffset(months=n_months - 1)

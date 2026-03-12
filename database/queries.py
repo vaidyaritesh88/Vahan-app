@@ -447,6 +447,36 @@ def get_states_with_data(category_code=None):
     return df["state"].tolist()
 
 
+
+
+def get_state_all_categories_monthly(state):
+    """Get monthly volumes for all base categories in a specific state.
+
+    Returns DataFrame: category_code, year, month, volume, date
+    Filters to __TOTAL__ rows and base categories only.
+    """
+    df = _query_df("""
+        SELECT category_code, year, month, volume
+        FROM state_monthly
+        WHERE state = ? AND oem_name = '__TOTAL__'
+              AND category_code IN ('PV', '2W', '3W', 'CV', 'TRACTORS')
+              AND volume > 0
+        ORDER BY category_code, year, month
+    """, [state])
+    if not df.empty:
+        df["date"] = pd.to_datetime(df[["year", "month"]].assign(day=1))
+    return df
+
+
+def get_state_available_months():
+    """Get available (year, month) pairs from state_monthly data, sorted desc."""
+    df = _query_df("""
+        SELECT DISTINCT year, month FROM state_monthly
+        WHERE volume > 0 AND oem_name = '__TOTAL__'
+        ORDER BY year DESC, month DESC
+    """)
+    return list(zip(df["year"], df["month"]))
+
 # ──────────────────────────────────────────────
 # OEM 360 ENHANCED / INDUSTRY ANALYSIS
 # ──────────────────────────────────────────────
