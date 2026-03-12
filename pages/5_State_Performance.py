@@ -68,14 +68,15 @@ if filtered.empty:
 
 # ── Period Label Helper ───────────────────────
 def _period_label(row, freq):
-    """Generate human-readable period label based on frequency."""
+    """Generate human-readable period label based on frequency.
+
+    For monthly: uses year/month columns with format_month().
+    For quarterly/annual: uses period_label column set by aggregate_by_frequency().
+    """
+    if freq != "monthly" and "period_label" in row.index:
+        return row["period_label"]
     y, m = int(row["year"]), int(row["month"])
-    if freq == "monthly":
-        return format_month(y, m)
-    elif freq == "quarterly":
-        return format_quarter(y, m)
-    else:
-        return format_fy(y, m)
+    return format_month(y, m)
 
 
 # ══════════════════════════════════════════════
