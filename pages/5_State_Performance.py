@@ -20,6 +20,25 @@ from components.charts import dual_axis_bar_line
 init_db()
 
 st.set_page_config(page_title="State Performance", page_icon="\U0001f4cd", layout="wide")
+
+# ── Right-align numbers in dataframes via CSS ──
+st.markdown("""
+<style>
+    /* Right-align all table cells except the first column (index) */
+    div[data-testid="stDataFrame"] td {
+        text-align: right !important;
+    }
+    /* Keep index column left-aligned */
+    div[data-testid="stDataFrame"] th {
+        text-align: center !important;
+    }
+    /* Compact table styling */
+    div[data-testid="stDataFrame"] table {
+        font-size: 0.85rem;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 st.title("State Performance")
 
 if not has_state_data():
@@ -79,6 +98,34 @@ def _period_label(row, freq):
     return format_month(y, m)
 
 
+def _get_incomplete_periods(raw_data, freq):
+    """Detect incomplete quarterly/annual periods in the raw monthly data.
+
+    Returns a set of period_labels that are incomplete (fewer months than expected).
+    For monthly frequency, returns empty set.
+    """
+    if freq == "monthly":
+        return set()
+
+    df = add_fy_columns(raw_data)
+
+    if freq == "quarterly":
+        # Each quarter should have 3 months
+        counts = df.groupby("q_label")["month"].nunique()
+        return set(counts[counts < 3].index)
+
+    elif freq == "annual":
+        # Each FY should have 12 months
+        counts = df.groupby("fy_label")["month"].nunique()
+        return set(counts[counts < 12].index)
+
+    return set()
+
+
+# Detect incomplete periods from the filtered data
+incomplete_periods = _get_incomplete_periods(filtered, freq)
+
+
 # ══════════════════════════════════════════════
 # SECTION 1: Volume Trend + YoY Chart
 # ══════════════════════════════════════════════
@@ -103,12 +150,16 @@ else:
         else:
             cat_agg["yoy_pct"] = np.nan
 
+        # Null out YoY for incomplete periods
+        if incomplete_periods:
+            cat_agg.loc[cat_agg["period_label"].isin(incomplete_periods), "yoy_pct"] = np.nan
+
     cat_agg["label"] = cat_agg.apply(lambda r: _period_label(r, freq), axis=1)
 
     # Drop rows where yoy_pct is NaN for cleaner chart
     chart_df = cat_agg.dropna(subset=["yoy_pct"]).copy()
 
-    st.subheader(f"{selected_cat} — {selected_state}")
+    st.subheader(f"{selected_cat} \u2014 {selected_state}")
     if not chart_df.empty:
         fig = dual_axis_bar_line(
             chart_df, x="label", bar_y="volume", line_y="yoy_pct",
@@ -128,7 +179,7 @@ st.divider()
 # ══════════════════════════════════════════════
 # SECTION 2: Transposed Data Tables
 # ══════════════════════════════════════════════
-st.subheader(f"Category Data — {selected_state}")
+st.subheader(f"Category Data \u2014 {selected_state}")
 
 # Aggregate all categories by frequency
 tables_data = filtered.copy()
@@ -161,6 +212,11 @@ pivot_vol = pivot_vol.reindex(columns=ordered_labels)
 cat_order = [c for c in BASE_CATS if c in pivot_vol.index]
 pivot_vol = pivot_vol.reindex(cat_order)
 
+# Add TOTAL row
+total_row = pivot_vol.sum(axis=0)
+total_row.name = "TOTAL"
+pivot_vol = pd.concat([pivot_vol, total_row.to_frame().T])
+
 
 # ── Table A: Volume ──
 st.markdown("**Volume (units)**")
@@ -178,11 +234,18 @@ st.markdown("**YoY Growth %**")
 
 # Compute YoY for each cell: compare to same period label offset
 yoy_data = pivot_vol.copy().astype(float)
-yoy_result = pd.DataFrame(index=cat_order, columns=ordered_labels, dtype=object)
+row_labels = cat_order + ["TOTAL"]
+yoy_result = pd.DataFrame(index=row_labels, columns=ordered_labels, dtype=object)
 
-for cat in cat_order:
+for cat in row_labels:
     for col_idx, col in enumerate(ordered_labels):
+        # Skip incomplete periods
+        if col in incomplete_periods:
+            yoy_result.loc[cat, col] = "\u2014"
+            continue
+
         curr = yoy_data.loc[cat, col] if cat in yoy_data.index and col in yoy_data.columns else None
+
         # Find prior-year period
         if freq == "monthly" and col_idx >= 12:
             prev_label = ordered_labels[col_idx - 12]
@@ -192,6 +255,11 @@ for cat in cat_order:
             prev_label = ordered_labels[col_idx - 1]
         else:
             prev_label = None
+
+        # Also skip if the prior period is incomplete (unfair comparison)
+        if prev_label and prev_label in incomplete_periods:
+            yoy_result.loc[cat, col] = "\u2014"
+            continue
 
         if prev_label and prev_label in yoy_data.columns:
             prev = yoy_data.loc[cat, prev_label]
@@ -210,8 +278,10 @@ st.dataframe(yoy_result, use_container_width=True)
 # ── Table C: Category Mix % ──
 st.markdown("**Category Mix %**")
 
-totals = pivot_vol.sum(axis=0)
-mix_display = pivot_vol.copy()
+# Use pivot WITHOUT total row for mix calculation
+pivot_no_total = pivot_vol.drop("TOTAL", errors="ignore")
+totals = pivot_no_total.sum(axis=0)
+mix_display = pivot_no_total.copy()
 
 for col in mix_display.columns:
     total = totals[col]

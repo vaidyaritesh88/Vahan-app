@@ -1147,6 +1147,14 @@ def aggregate_state_to_national():
     Sums all state volumes for each (category, OEM, year, month) combination
     and upserts into national_monthly with source='vahan_scrape'.
 
+    IMPORTANT: Excludes sentinel category codes (__ALL__, __EV__, __CNG__,
+    __HYBRID__) and sentinel OEM names (__TOTAL__) as these are metadata rows
+    from the Y-axis scraper, not actual per-OEM per-category data.
+
+    Also excludes categories already covered by Excel data (PV, 2W, 3W, CV,
+    TRACTORS and their subsegments) since Excel is the authoritative source
+    for national-level data.
+
     Preserves existing Excel-sourced rows — only inserts new rows or updates
     rows that were previously sourced from scraping.
 
@@ -1159,6 +1167,8 @@ def aggregate_state_to_national():
         SELECT category_code, oem_name, year, month, SUM(volume), 'vahan_scrape'
         FROM state_monthly
         WHERE volume > 0
+          AND category_code NOT IN ('__ALL__', '__EV__', '__CNG__', '__HYBRID__')
+          AND oem_name != '__TOTAL__'
         GROUP BY category_code, oem_name, year, month
         ON CONFLICT(category_code, oem_name, year, month)
         DO UPDATE SET volume = excluded.volume,

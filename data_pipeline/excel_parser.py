@@ -259,8 +259,31 @@ def _aggregate_records(records):
 
 
 def _upsert_national_records(conn, records):
-    """Insert or update national monthly records."""
+    """Insert or update national monthly records.
+
+    Before inserting, deletes ALL existing excel-sourced records for the same
+    (category_code, year, month) combinations found in the new data.
+    This prevents stale OEM entries from persisting when an OEM is removed
+    from a sheet between Excel file versions.
+    """
+    if not records:
+        return
+
     cursor = conn.cursor()
+
+    # Find unique (category_code, year, month) combos in new data
+    periods = set()
+    for r in records:
+        periods.add((r["category_code"], r["year"], r["month"]))
+
+    # Delete existing excel-sourced data for these periods
+    for cat, year, month in periods:
+        cursor.execute("""
+            DELETE FROM national_monthly
+            WHERE category_code = ? AND year = ? AND month = ? AND source = 'excel'
+        """, (cat, year, month))
+
+    # Insert fresh data
     for r in records:
         cursor.execute("""
             INSERT INTO national_monthly (category_code, oem_name, year, month, volume, source)
