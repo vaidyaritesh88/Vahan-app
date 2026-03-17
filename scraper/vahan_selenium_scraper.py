@@ -10,7 +10,7 @@ Key discoveries from testing:
     and establish server-side state.
   - Checkbox filtering ONLY works with j_idt75 or j_idt84 (filter panel
     Refresh buttons). j_idt70 (main Refresh) ignores checkboxes entirely.
-  - The table uses scroll-based loading (not pagination).
+  - The table uses PrimeFaces DataTable with pagination (50 rows/page).
   - Month columns: idx 2=first month (JAN for CY, APR for FY).
 """
 import time
@@ -399,6 +399,9 @@ class VahanSeleniumScraper:
 
         Table columns: S No | Maker | month1 | month2 | ... | TOTAL
         For Calendar Year: month1=JAN=col_idx 2, FEB=3, MAR=4, etc.
+
+        Handles pagination: the groupingTable may show 50 rows per page.
+        We iterate through all pages to capture all OEMs.
         """
         month_label = MONTH_LABELS[target_month - 1]
 
@@ -410,11 +413,63 @@ class VahanSeleniumScraper:
 
         logger.info(f"Extracting '{month_label}' from column index {col_idx}")
 
-        # The table uses scroll-based loading — extract all visible rows
-        # (no pagination on this portal for this view)
-        records = self._extract_page_data(col_idx)
-        logger.info(f"Extracted {len(records)} records for {month_label}")
-        return records
+        all_records = []
+        page_num = 1
+
+        while True:
+            # Extract current page data
+            page_records = self._extract_page_data(col_idx)
+            all_records.extend(page_records)
+            logger.info(f"  Page {page_num}: {len(page_records)} records")
+
+            # Check if there's a next page button
+            has_next = self._goto_next_page()
+            if not has_next:
+                break
+            page_num += 1
+
+            # Safety: max 50 pages (EV_3W has 400+ small OEMs)
+            if page_num > 50:
+                logger.warning("Hit 50-page safety limit, stopping pagination")
+                break
+
+        logger.info(f"Extracted {len(all_records)} total records for {month_label} ({page_num} pages)")
+        return all_records
+
+    def _goto_next_page(self):
+        """Click the next page button in the PrimeFaces DataTable paginator.
+
+        Returns True if successfully navigated to next page, False if on last page.
+        """
+        try:
+            # Check if paginator exists and has a next button that's not disabled
+            result = self.driver.execute_script("""
+                // PrimeFaces DataTable paginator: look for .ui-paginator-next
+                var nextBtns = document.querySelectorAll(
+                    '#groupingTable_paginator_bottom .ui-paginator-next, ' +
+                    '.ui-paginator-next'
+                );
+                for (var i = 0; i < nextBtns.length; i++) {
+                    var btn = nextBtns[i];
+                    // Check if it's not disabled
+                    if (!btn.classList.contains('ui-state-disabled')) {
+                        btn.click();
+                        return 'CLICKED';
+                    }
+                }
+                // No paginator or last page
+                return 'NO_NEXT';
+            """)
+
+            if result == 'CLICKED':
+                time.sleep(3)  # Wait for table to reload
+                self._wait_for_unblock()
+                return True
+            return False
+
+        except Exception as e:
+            logger.debug(f"Pagination check: {e}")
+            return False
 
     def _find_month_column(self, month_label):
         """Find the column index for a given month label.
