@@ -104,6 +104,9 @@ class VahanSeleniumScraper:
     def scrape_subsegment(self, subsegment_code, fy_start, month_num=None):
         """Scrape a subsegment for a financial year (Apr fy_start to Mar fy_start+1).
 
+        Optimized: extracts ALL available months from each calendar year view
+        in a single page load, instead of one page load per month.
+
         Args:
             subsegment_code: e.g. "EV_PV", "PV_CNG", "PV_HYBRID", "EV_2W", etc.
             fy_start: FY start year (e.g. 2025 for FY26 = Apr 2025 - Mar 2026)
@@ -119,25 +122,38 @@ class VahanSeleniumScraper:
                 f"Available: {list(VAHAN_SCRAPE_CONFIGS.keys())}"
             )
 
-        # Determine which calendar years to scrape
         if month_num:
+            # Single month: just one CY scrape
             cy = fy_start if month_num >= 4 else fy_start + 1
-            year_months = [(cy, month_num)]
-        else:
-            year_months = [(fy_start, m) for m in range(4, 13)]
-            year_months += [(fy_start + 1, m) for m in range(1, 4)]
+            return self._scrape_cy_and_store(
+                subsegment_code, config, cy, [month_num]
+            )
 
+        # Full FY: group months by calendar year for efficiency
+        # FY26 (fy_start=2025): Apr-Dec 2025 + Jan-Mar 2026
         total_rows = 0
-        for cy, m in year_months:
-            try:
-                rows = self._scrape_and_store_month(
-                    subsegment_code, config, cy, m
-                )
-                total_rows += rows
-                logger.info(f"  {subsegment_code} {cy}-{m:02d}: {rows} rows stored")
-            except Exception as e:
-                logger.error(f"  {subsegment_code} {cy}-{m:02d}: FAILED - {e}")
-                self._page_loaded = False
+
+        # Calendar year 1: Apr-Dec of fy_start
+        months_cy1 = list(range(4, 13))  # [4, 5, ..., 12]
+        try:
+            rows = self._scrape_cy_and_store(
+                subsegment_code, config, fy_start, months_cy1
+            )
+            total_rows += rows
+        except Exception as e:
+            logger.error(f"  {subsegment_code} CY{fy_start}: FAILED - {e}")
+            self._page_loaded = False
+
+        # Calendar year 2: Jan-Mar of fy_start+1
+        months_cy2 = list(range(1, 4))  # [1, 2, 3]
+        try:
+            rows = self._scrape_cy_and_store(
+                subsegment_code, config, fy_start + 1, months_cy2
+            )
+            total_rows += rows
+        except Exception as e:
+            logger.error(f"  {subsegment_code} CY{fy_start + 1}: FAILED - {e}")
+            self._page_loaded = False
 
         return total_rows
 
@@ -155,16 +171,37 @@ class VahanSeleniumScraper:
 
     # -- Internal: page setup ------------------------------------------------
 
-    def _scrape_and_store_month(self, subsegment_code, config, year, month):
-        """Scrape one subsegment for one calendar month and store results."""
-        records = self._scrape_month(config, year, month)
-        if not records:
-            logger.warning(f"No data for {subsegment_code} {year}-{month:02d}")
-            return 0
-        return self._store_records(subsegment_code, records, year, month)
+    def _scrape_cy_and_store(self, subsegment_code, config, year, months):
+        """Scrape one calendar year view and extract multiple months at once.
 
-    def _scrape_month(self, config, year, month):
-        """Navigate portal, set filters + checkboxes, extract data for one month."""
+        This is much faster than scraping each month individually because
+        the table shows ALL months (JAN-DEC) in a single view.
+        """
+        logger.info(
+            f"Scraping {subsegment_code} CY{year} "
+            f"months={[MONTH_LABELS[m-1] for m in months]}"
+        )
+
+        # Load page and set up filters
+        self._setup_filtered_view(config, year)
+
+        # Extract data for each target month from the loaded table
+        total_rows = 0
+        for month in months:
+            records = self._extract_month_data(month)
+            if records:
+                rows = self._store_records(subsegment_code, records, year, month)
+                total_rows += rows
+                logger.info(
+                    f"  {subsegment_code} {year}-{month:02d}: {rows} OEMs stored"
+                )
+            else:
+                logger.info(f"  {subsegment_code} {year}-{month:02d}: no data")
+
+        return total_rows
+
+    def _setup_filtered_view(self, config, year):
+        """Set up the portal with dropdowns + checkboxes for a calendar year."""
         if not self._page_loaded:
             self._load_page()
 
@@ -205,9 +242,6 @@ class VahanSeleniumScraper:
 
         # Wait for table to load
         self._wait_for_table()
-
-        # Extract data for the target month
-        return self._extract_month_data(month)
 
     def _load_page(self):
         """Load the Vahan portal page."""
