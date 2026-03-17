@@ -27,6 +27,8 @@ from database.queries import (
     get_oem_vehcat_monthly, get_oem_fuel_monthly, get_last_scrape_info,
     get_oem_total_monthly_scraped, get_oem_category_breakdown_scraped,
     get_oem_category_monthly_scraped, get_market_category_monthly_scraped,
+    get_oem_subsegment_monthly, get_subsegment_market_monthly,
+    has_oem_subsegment_data,
 )
 from components.filters import oem_selector, period_selector
 from components.formatters import (
@@ -413,6 +415,254 @@ if not cat_monthly.empty:
                 st.dataframe(display_growth, use_container_width=True)
 
     st.divider()
+
+
+# ════════════════════════════════════════
+# SECTION 3B: SUB-CATEGORY SALES MIX (from Selenium-scraped subsegment data)
+# ════════════════════════════════════════
+# This section shows EV/CNG/Hybrid/ICE breakdown within each base category
+# Data comes from national_oem_subsegment table (Selenium scraper with checkbox filters)
+
+if has_oem_subsegment_data(oem_normalized):
+    # Get base categories this OEM participates in
+    base_cats_df = get_oem_categories_list(oem_normalized)
+    if not base_cats_df.empty:
+        base_cats_with_subs = []
+        for _, row in base_cats_df.iterrows():
+            bc = row["category_code"]
+            subs = get_subsegments_for_base(bc)
+            if not subs.empty:
+                base_cats_with_subs.append((bc, row["category_name"], subs))
+
+        if base_cats_with_subs:
+            st.subheader("Sub-Category Sales Mix")
+            st.caption(
+                "Breakdown of each vehicle category into sub-types "
+                "(ICE, EV, CNG, Hybrid). Source: Vahan portal (Selenium scraper)"
+            )
+
+            for bc_code, bc_name, subs_df in base_cats_with_subs:
+                st.markdown(f"#### {bc_name}")
+
+                sub_codes = subs_df["code"].tolist()
+                sub_names = dict(zip(subs_df["code"], subs_df["name"]))
+
+                # Get OEM's subsegment monthly data
+                sub_monthly = get_oem_subsegment_monthly(oem_normalized, bc_code)
+
+                # Get base category monthly totals for this OEM
+                bc_monthly = cat_monthly[cat_monthly["base_category"] == bc_code].copy()
+
+                if sub_monthly.empty or bc_monthly.empty:
+                    st.info(f"No sub-category data for {bc_name}.")
+                    continue
+
+                # Build combined DataFrame: one row per (year, month, sub_type)
+                # including ICE = base_total - sum(subsegments)
+                months_available = bc_monthly[["year", "month", "date", "volume"]].copy()
+                months_available = months_available.rename(columns={"volume": "base_vol"})
+
+                # Pivot subsegments: year, month -> sub_code -> volume
+                sub_pivot = sub_monthly.pivot_table(
+                    index=["year", "month"], columns="subsegment_code",
+                    values="volume", fill_value=0
+                ).reset_index()
+
+                # Merge base volumes with subsegment data
+                combined = months_available.merge(sub_pivot, on=["year", "month"], how="left")
+                for sc in sub_codes:
+                    if sc not in combined.columns:
+                        combined[sc] = 0
+                    combined[sc] = combined[sc].fillna(0)
+
+                # Compute ICE = base - sum(subsegments), clipped to 0
+                combined["ICE"] = (combined["base_vol"] - combined[sub_codes].sum(axis=1)).clip(lower=0)
+
+                # Build long-form data: (year, month, date, sub_type, volume)
+                sub_type_cols = ["ICE"] + sub_codes
+                sub_type_names = {"ICE": f"ICE {bc_name}"}
+                sub_type_names.update(sub_names)
+
+                rows_long = []
+                for _, r in combined.iterrows():
+                    for st_code in sub_type_cols:
+                        rows_long.append({
+                            "year": int(r["year"]),
+                            "month": int(r["month"]),
+                            "date": r["date"],
+                            "sub_type": st_code,
+                            "sub_name": sub_type_names.get(st_code, st_code),
+                            "volume": r[st_code],
+                        })
+
+                sub_long = pd.DataFrame(rows_long)
+                sub_long = filter_by_period(sub_long, start_date, end_date)
+
+                if sub_long.empty:
+                    st.info(f"No sub-category data for {bc_name} in selected period.")
+                    continue
+
+                # Add period labels based on frequency
+                if freq != "monthly":
+                    sub_long = add_fy_columns(sub_long)
+                    if freq == "quarterly":
+                        sub_long = sub_long.groupby(["sub_type", "sub_name", "fy", "quarter", "q_label"]).agg(
+                            volume=("volume", "sum")).reset_index()
+                        sub_long["period_label"] = sub_long["q_label"]
+                        sub_long["date"] = sub_long.apply(
+                            lambda r: pd.Timestamp(int(r["fy"]) + (1 if r["quarter"] == 4 else 0),
+                                                   {1: 5, 2: 8, 3: 11, 4: 2}[int(r["quarter"])], 1), axis=1)
+                    else:
+                        sub_long = sub_long.groupby(["sub_type", "sub_name", "fy", "fy_label"]).agg(
+                            volume=("volume", "sum")).reset_index()
+                        sub_long["period_label"] = sub_long["fy_label"]
+                        sub_long["date"] = sub_long["fy"].apply(lambda y: pd.Timestamp(int(y), 10, 1))
+                else:
+                    sub_long["period_label"] = sub_long.apply(
+                        lambda r: format_month(int(r["year"]), int(r["month"])), axis=1)
+
+                sub_long = sub_long.sort_values("date")
+                period_labels_sub = sub_long.sort_values("date")["period_label"].unique().tolist()
+
+                # Compute share %
+                period_totals_sub = sub_long.groupby("period_label")["volume"].sum().to_dict()
+                sub_long["pct"] = sub_long.apply(
+                    lambda r: round(r["volume"] / period_totals_sub[r["period_label"]] * 100, 1)
+                    if period_totals_sub.get(r["period_label"], 0) > 0 else 0, axis=1)
+
+                # Sub-type order: ICE first (usually largest), then subsegments
+                type_order = [t for t in sub_type_cols if t in sub_long["sub_type"].unique()]
+
+                # ── 3B-1: 100% Stacked Bar Chart ──
+                pivot_sub_pct = sub_long.pivot_table(
+                    index="period_label", columns="sub_type", values="pct", fill_value=0)
+                pivot_sub_pct = pivot_sub_pct.reindex(period_labels_sub)
+                pivot_sub_pct = pivot_sub_pct.reindex(columns=[c for c in type_order if c in pivot_sub_pct.columns])
+
+                # Map sub_type codes to display names for chart
+                display_names = {t: sub_type_names.get(t, t) for t in type_order}
+
+                sub_colors = {
+                    "ICE": "#636EFA",
+                    "EV_PV": "#00CC96", "EV_2W": "#00CC96", "EV_3W": "#00CC96",
+                    "PV_CNG": "#FFA15A",
+                    "PV_HYBRID": "#AB63FA",
+                }
+                default_colors = ["#19D3F3", "#FF6692", "#B6E880", "#FF97FF"]
+
+                fig_sub = go.Figure()
+                for i, col_name in enumerate(pivot_sub_pct.columns):
+                    color = sub_colors.get(col_name, default_colors[i % len(default_colors)])
+                    fig_sub.add_trace(go.Bar(
+                        x=pivot_sub_pct.index, y=pivot_sub_pct[col_name],
+                        name=display_names.get(col_name, col_name),
+                        marker_color=color,
+                    ))
+
+                freq_title_sub = {"monthly": "Monthly", "quarterly": "Quarterly", "annual": "Annual"}[freq]
+                fig_sub.update_layout(
+                    **LAYOUT_DEFAULTS,
+                    barmode="stack",
+                    title=f"{oem_normalized} — {bc_name} Sub-Category Mix ({freq_title_sub}) (%)",
+                    yaxis_title="Share %",
+                    height=400,
+                )
+                fig_sub.update_xaxes(title="")
+                st.plotly_chart(fig_sub, use_container_width=True)
+
+                # ── 3B-2: Volume Table ──
+                pivot_sub_vol = sub_long.pivot_table(
+                    index="sub_type", columns="period_label", values="volume", fill_value=0)
+                pivot_sub_vol = pivot_sub_vol.reindex(columns=period_labels_sub)
+                pivot_sub_vol = pivot_sub_vol.reindex([t for t in type_order if t in pivot_sub_vol.index])
+
+                # Rename index to display names
+                pivot_sub_vol.index = [display_names.get(t, t) for t in pivot_sub_vol.index]
+
+                total_sub = pivot_sub_vol.sum(axis=0)
+                total_sub.name = f"TOTAL ({bc_name})"
+                pivot_sub_vol = pd.concat([pivot_sub_vol, total_sub.to_frame().T])
+
+                display_sub_vol = pivot_sub_vol.map(
+                    lambda x: _fmt_vol(x) if isinstance(x, (int, float, np.integer, np.floating)) else x)
+                display_sub_vol.index.name = "Sub-Category"
+
+                st.markdown(f"**{bc_name} Sub-Category Volume ({freq_title_sub})**")
+                st.dataframe(display_sub_vol, use_container_width=True)
+
+                # ── 3B-3: YoY Growth Table ──
+                # Use full (unfiltered) data for prior-year comparisons
+                sub_full = get_oem_subsegment_monthly(oem_normalized, bc_code)
+                bc_full = get_oem_category_monthly_scraped(oem_normalized)
+                bc_full = bc_full[bc_full["base_category"] == bc_code].copy()
+
+                if not sub_full.empty and not bc_full.empty:
+                    # Build per-month base totals
+                    bc_lookup = {}
+                    for _, r in bc_full.iterrows():
+                        bc_lookup[(int(r["year"]), int(r["month"]))] = r["volume"]
+
+                    # Build per-month per-subtype volumes
+                    sub_vol_lookup = {}
+                    for _, r in sub_full.iterrows():
+                        sub_vol_lookup[(r["subsegment_code"], int(r["year"]), int(r["month"]))] = r["volume"]
+
+                    # Compute ICE per month
+                    ice_lookup = {}
+                    for (y, m), base_v in bc_lookup.items():
+                        sub_sum = sum(sub_vol_lookup.get((sc, y, m), 0) for sc in sub_codes)
+                        ice_lookup[(y, m)] = max(0, base_v - sub_sum)
+
+                    # Build growth for each period_label
+                    growth_sub = {}
+                    for st_code in type_order:
+                        dn = display_names.get(st_code, st_code)
+                        growth_sub[dn] = {}
+
+                    growth_sub[f"TOTAL ({bc_name})"] = {}
+
+                    for plbl in period_labels_sub:
+                        rows_p = sub_long[sub_long["period_label"] == plbl]
+                        if rows_p.empty:
+                            continue
+                        sample = rows_p.iloc[0]
+
+                        if freq == "monthly":
+                            y, m = int(sample["year"]), int(sample["month"])
+                            py, pm = y - 1, m
+                        elif freq == "quarterly":
+                            # For quarterly/annual, we'd need more complex aggregation
+                            # Skip detailed YoY for non-monthly for now
+                            continue
+                        else:
+                            continue
+
+                        total_curr, total_prev = 0, 0
+                        for st_code in type_order:
+                            dn = display_names.get(st_code, st_code)
+                            if st_code == "ICE":
+                                curr = ice_lookup.get((y, m), 0)
+                                prev = ice_lookup.get((py, pm), 0)
+                            else:
+                                curr = sub_vol_lookup.get((st_code, y, m), 0)
+                                prev = sub_vol_lookup.get((st_code, py, pm), 0)
+                            growth_sub[dn][plbl] = _safe_growth(curr, prev)
+                            total_curr += curr
+                            total_prev += prev
+
+                        growth_sub[f"TOTAL ({bc_name})"][plbl] = _safe_growth(total_curr, total_prev)
+
+                    growth_sub_df = pd.DataFrame(growth_sub).T.reindex(columns=period_labels_sub)
+                    growth_sub_df.index.name = "Sub-Category"
+                    display_sub_growth = growth_sub_df.map(_fmt_growth)
+
+                    if not growth_sub_df.dropna(how="all", axis=1).empty:
+                        with st.expander(f"{bc_name} Sub-Category — YoY Growth ({freq_title_sub}) (%)", expanded=False):
+                            st.dataframe(display_sub_growth, use_container_width=True)
+
+                st.markdown("---")
+
+            st.divider()
 
 
 # ════════════════════════════════════════

@@ -1440,3 +1440,87 @@ def has_national_oem_data(oem_name=None):
         row = conn.execute("SELECT COUNT(*) as cnt FROM national_oem_vehcat").fetchone()
     conn.close()
     return row['cnt'] > 0
+
+# ── National OEM Subsegment queries (Selenium-scraped data) ────────────
+
+def get_oem_subsegment_monthly(oem_name, base_category_code):
+    """Get an OEM's monthly volumes across all subsegments of a base category.
+
+    Uses the national_oem_subsegment table (Selenium-scraped) cross-referenced
+    with the categories table to find which subsegment codes belong to the base.
+
+    Returns DataFrame: year, month, subsegment_code, volume
+    Example: get_oem_subsegment_monthly("Tata Motors", "PV")
+      -> EV_PV / PV_CNG / PV_HYBRID monthly volumes for Tata
+    """
+    # Get subsegment codes for this base category
+    subs = get_subsegments_for_base(base_category_code)
+    if subs.empty:
+        return pd.DataFrame(columns=["year", "month", "subsegment_code", "volume"])
+
+    sub_codes = subs["code"].tolist()
+    placeholders = ",".join(["?"] * len(sub_codes))
+    return _query_df(f"""
+        SELECT year, month, subsegment_code, SUM(volume) as volume
+        FROM national_oem_subsegment
+        WHERE oem_name = ? AND subsegment_code IN ({placeholders})
+        GROUP BY year, month, subsegment_code
+        ORDER BY year, month, subsegment_code
+    """, [oem_name] + sub_codes)
+
+
+def get_subsegment_market_monthly(subsegment_code):
+    """Get market-wide monthly totals for a subsegment (all OEMs combined).
+
+    Used for computing OEM market share within a subsegment.
+    Returns DataFrame: year, month, total_volume
+    """
+    return _query_df("""
+        SELECT year, month, SUM(volume) as total_volume
+        FROM national_oem_subsegment
+        WHERE subsegment_code = ?
+        GROUP BY year, month
+        ORDER BY year, month
+    """, [subsegment_code])
+
+
+def get_oem_subsegment_summary(oem_name, year, month):
+    """Get OEM's subsegment volumes for a specific month (snapshot view).
+
+    Returns DataFrame: subsegment_code, volume
+    """
+    return _query_df("""
+        SELECT subsegment_code, volume
+        FROM national_oem_subsegment
+        WHERE oem_name = ? AND year = ? AND month = ?
+        ORDER BY volume DESC
+    """, [oem_name, year, month])
+
+
+def get_all_oem_subsegment_monthly(subsegment_code):
+    """Get all OEMs' monthly volumes for a specific subsegment.
+
+    Used for computing market share and competitive landscape.
+    Returns DataFrame: oem_name, year, month, volume
+    """
+    return _query_df("""
+        SELECT oem_name, year, month, volume
+        FROM national_oem_subsegment
+        WHERE subsegment_code = ? AND volume > 0
+        ORDER BY year, month, volume DESC
+    """, [subsegment_code])
+
+
+def has_oem_subsegment_data(oem_name=None):
+    """Check if we have any data in national_oem_subsegment table."""
+    conn = get_connection()
+    if oem_name:
+        row = conn.execute(
+            "SELECT COUNT(*) as cnt FROM national_oem_subsegment WHERE oem_name = ?",
+            (oem_name,)
+        ).fetchone()
+    else:
+        row = conn.execute("SELECT COUNT(*) as cnt FROM national_oem_subsegment").fetchone()
+    conn.close()
+    return row['cnt'] > 0
+
