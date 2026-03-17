@@ -19,6 +19,7 @@ import logging
 import os
 import sys
 import time
+import subprocess
 from datetime import datetime
 
 # Ensure project root is importable
@@ -198,102 +199,63 @@ def run_state_scrape(states, years, modes=("category", "fuel", "maker"),
     finally:
         _cleanup_control()
 
+    if success > 0:
+        print("\nAggregating state data to national totals...")
+        agg = aggregate_state_to_national()
+        print(f"Aggregated {agg:,} national records.")
+
     print(f"\nDone! {success} succeeded, {failed} failed, "
           f"{total_rows:,} rows upserted.")
 
+    if success > 0:
+        print("\nPushing updated DB to remote...")
+        _git_push_db()
 
-def run(categories, states, years, delay=2, skip_existing=True):
-    """Legacy per-category scrape loop (kept for backward compatibility)."""
-    from scraper.vahan_http_scraper import VahanHttpScraper, get_pending_scrapes
 
-    running, info = is_scraper_running()
-    if running:
-        print(f"Scraper already running (PID {info.get('pid')}). Stop it first.")
-        sys.exit(1)
-
-    if skip_existing:
-        jobs = get_pending_scrapes(categories, states, years)
-    else:
-        jobs = [(c, s, y) for c in categories for s in states for y in years]
-
-    if not jobs:
-        print("Nothing to scrape -- all combinations already done.")
+def _git_push_db():
+    """Commit and push the updated database to keep the remote in sync."""
+    repo_root = pathlib.Path(__file__).resolve().parent.parent
+    db_path = repo_root / "data" / "vahan_tracker.db"
+    if not db_path.exists():
+        print("  DB file not found, skipping git push.")
         return
 
-    total = len(jobs)
-    print(f"Starting legacy scrape: {total} combinations")
-    print(f"Categories: {categories}")
-    print(f"States: {len(states)} states")
-    print(f"Years: {years}")
-    print(f"Delay: {delay}s between requests")
-    print(f"PID: {os.getpid()}")
-    print("-" * 60)
-
-    _write_control("running", extra={
-        "total_jobs": total,
-        "categories": categories,
-        "years": years,
-        "states_count": len(states),
-        "delay": delay,
-        "started_at": datetime.now().isoformat(),
-    })
-
-    scraper = None
-    success = 0
-    failed = 0
-    total_rows = 0
-
     try:
-        scraper = VahanHttpScraper()
+        def _run(cmd):
+            return subprocess.run(
+                cmd, cwd=str(repo_root),
+                capture_output=True, text=True, timeout=120,
+            )
 
-        for i, (cat, state, year) in enumerate(jobs):
-            if _should_stop():
-                print(f"\nStop requested. Completed {success + failed}/{total}.")
-                break
+        # Check if there are actual changes to the DB
+        status = _run(["git", "status", "--porcelain", str(db_path)])
+        if not status.stdout.strip():
+            print("  No DB changes detected, skipping git push.")
+            return
 
-            label = f"[{i+1}/{total}] {cat} / {state} / {year}"
-            print(f"{label} ...", end=" ", flush=True)
+        # Stage, commit, push
+        r1 = _run(["git", "add", str(db_path)])
+        if r1.returncode != 0:
+            print(f"  git add failed: {r1.stderr.strip()}")
+            return
 
-            try:
-                rows = scraper.scrape_and_store(cat, state, year)
-                total_rows += rows
-                success += 1
-                print(f"OK ({rows} rows)")
-            except Exception as e:
-                failed += 1
-                print(f"FAILED: {str(e)[:80]}")
+        from datetime import datetime
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+        msg = f"data: update vahan_tracker.db ({ts})"
+        r2 = _run(["git", "commit", "-m", msg])
+        if r2.returncode != 0:
+            print(f"  git commit failed: {r2.stderr.strip()}")
+            return
 
-            _write_control("running", extra={
-                "total_jobs": total,
-                "completed": success + failed,
-                "success": success,
-                "failed": failed,
-                "total_rows": total_rows,
-                "current_job": label,
-                "categories": categories,
-                "years": years,
-                "states_count": len(states),
-                "delay": delay,
-                "started_at": _read_control().get("started_at", ""),
-            })
+        print(f"  Committed: {msg}")
+        r3 = _run(["git", "push"])
+        if r3.returncode != 0:
+            print(f"  git push failed: {r3.stderr.strip()}")
+            return
+        print("  Pushed to remote successfully.")
 
-            if i < total - 1:
-                time.sleep(delay)
-
-        if success > 0:
-            print("\nAggregating state data to national totals...")
-            agg = aggregate_state_to_national()
-            print(f"Aggregated {agg:,} national records.")
-
-    except KeyboardInterrupt:
-        print("\n\nKeyboard interrupt -- stopping gracefully.")
     except Exception as e:
-        print(f"\n\nFatal error: {e}")
-    finally:
-        _cleanup_control()
-
-    print(f"\nDone! {success} succeeded, {failed} failed, "
-          f"{total_rows:,} rows upserted.")
+        print(f"  Git push error (non-fatal): {e}")
 
 
 def main():

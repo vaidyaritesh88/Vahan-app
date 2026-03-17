@@ -118,12 +118,89 @@ def create_tables():
         loaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
 
+    -- National OEM x Vehicle Category (monthly)
+    CREATE TABLE IF NOT EXISTS national_oem_vehcat (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        oem_name TEXT NOT NULL,
+        oem_raw TEXT NOT NULL,
+        veh_category TEXT NOT NULL,
+        category_group TEXT NOT NULL,
+        year INTEGER NOT NULL,
+        month INTEGER NOT NULL,
+        volume INTEGER DEFAULT 0,
+        scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(oem_raw, veh_category, year, month)
+    );
+
+    -- National OEM x Fuel (monthly)
+    CREATE TABLE IF NOT EXISTS national_oem_fuel (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        oem_name TEXT NOT NULL,
+        oem_raw TEXT NOT NULL,
+        fuel_type TEXT NOT NULL,
+        fuel_group TEXT NOT NULL,
+        year INTEGER NOT NULL,
+        month INTEGER NOT NULL,
+        volume INTEGER DEFAULT 0,
+        scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(oem_raw, fuel_type, year, month)
+    );
+
+    -- National OEM x Vehicle Class (monthly) for Tractor/CE/Bus detail
+    CREATE TABLE IF NOT EXISTS national_oem_vehclass (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        oem_name TEXT NOT NULL,
+        oem_raw TEXT NOT NULL,
+        veh_class TEXT NOT NULL,
+        class_group TEXT NOT NULL,
+        year INTEGER NOT NULL,
+        month INTEGER NOT NULL,
+        volume INTEGER DEFAULT 0,
+        scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(oem_raw, veh_class, year, month)
+    );
+
+    -- OEM hierarchy: sub-entity to parent mapping with business metadata
+    CREATE TABLE IF NOT EXISTS oem_hierarchy (
+        oem_raw TEXT PRIMARY KEY,
+        oem_normalized TEXT NOT NULL,
+        parent_oem TEXT NOT NULL,
+        sub_brand TEXT,
+        business_category TEXT,
+        fuel_profile TEXT,
+        notes TEXT
+    );
+
+    -- Scrape metadata: tracks national scrape runs
+    CREATE TABLE IF NOT EXISTS scrape_metadata (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        scrape_type TEXT NOT NULL,
+        year INTEGER NOT NULL,
+        month INTEGER,
+        state TEXT,
+        started_at TIMESTAMP,
+        completed_at TIMESTAMP,
+        rows_upserted INTEGER DEFAULT 0,
+        status TEXT DEFAULT 'running',
+        UNIQUE(scrape_type, year, month, state)
+    );
+
     -- Indexes
     CREATE INDEX IF NOT EXISTS idx_national_cat_ym ON national_monthly(category_code, year, month);
     CREATE INDEX IF NOT EXISTS idx_national_oem ON national_monthly(oem_name);
     CREATE INDEX IF NOT EXISTS idx_state_cat_state ON state_monthly(category_code, state, year, month);
     CREATE INDEX IF NOT EXISTS idx_state_oem ON state_monthly(oem_name, state);
     CREATE INDEX IF NOT EXISTS idx_weekly_cat ON weekly_trends(category_code, week_ending);
+
+    CREATE INDEX IF NOT EXISTS idx_novc_oem ON national_oem_vehcat(oem_name, year, month);
+    CREATE INDEX IF NOT EXISTS idx_novc_cat ON national_oem_vehcat(category_group, year, month);
+    CREATE INDEX IF NOT EXISTS idx_nof_oem ON national_oem_fuel(oem_name, year, month);
+    CREATE INDEX IF NOT EXISTS idx_nof_fuel ON national_oem_fuel(fuel_group, year, month);
+    CREATE INDEX IF NOT EXISTS idx_novcl_oem ON national_oem_vehclass(oem_name, year, month);
+    CREATE INDEX IF NOT EXISTS idx_novcl_class ON national_oem_vehclass(class_group, year, month);
+    CREATE INDEX IF NOT EXISTS idx_hier_parent ON oem_hierarchy(parent_oem);
+    CREATE INDEX IF NOT EXISTS idx_hier_norm ON oem_hierarchy(oem_normalized);
+    CREATE INDEX IF NOT EXISTS idx_smeta_type ON scrape_metadata(scrape_type, year, month);
     """)
 
     conn.commit()

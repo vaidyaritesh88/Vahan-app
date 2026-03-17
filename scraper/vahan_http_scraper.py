@@ -19,6 +19,8 @@ from requests.adapters import HTTPAdapter
 from config.settings import (
     VAHAN_URL, VAHAN_SCRAPE_CONFIGS,
     VHCLASS_TO_CATEGORY, FUEL_TO_SUBCATEGORY,
+    VEHCAT_TO_CATEGORY, FUEL_TO_GROUP, VEHCLASS_TO_NATIONAL,
+    FY_DROPDOWN_VALUES, MONTH_DROPDOWN_MAP,
 )
 from config.oem_normalization import normalize_oem
 from database.schema import get_connection
@@ -316,7 +318,14 @@ class VahanHttpScraper:
         return r.text
 
     def _set_filters(self, state_code, year, config):
-        """Set all form filters via sequential AJAX calls."""
+        """Set all form filters via sequential AJAX calls.
+
+        Args:
+            state_code: State code (e.g. 'MH') or None for All States
+            year: Year number (used for logging; actual value from config)
+            config: Dict with keys: y_axis, x_axis, year_type ('C'/'F'),
+                    year_value (e.g. '2024-2025' for FY)
+        """
         # 1. Set number format to Actual
         if self._number_format_id:
             self._ajax_post(
@@ -327,47 +336,54 @@ class VahanHttpScraper:
             )
             time.sleep(0.5)
 
-        # 2. Select state — this triggers updates to RTO and other fields
+        # 2. Select state (or All States if state_code is None/empty)
         if self._state_id:
+            state_val = state_code if state_code else "-1"
             resp = self._ajax_post(
                 self._state_id,
                 self._state_id,
                 "selectedRto yaxisVar",
-                {f"{self._state_id}_input": state_code},
+                {f"{self._state_id}_input": state_val},
             )
             time.sleep(1)
 
-        # 3. Set Y-axis = Maker
+        # 3. Set Y-axis
         self._ajax_post(
             "yaxisVar", "yaxisVar", "yaxisVar",
             {"yaxisVar_input": config.get("y_axis", "Maker")},
         )
         time.sleep(0.5)
 
-        # 4. Set X-axis = Month Wise
+        # 4. Set X-axis
         self._ajax_post(
             "xaxisVar", "xaxisVar", "xaxisVar",
             {"xaxisVar_input": config.get("x_axis", "Month Wise")},
         )
         time.sleep(0.5)
 
-        # 5. Set year type to Calendar Year
+        # 5. Set year type: "C" = Calendar Year, "F" = Financial Year
+        year_type = config.get("year_type", "C")
         self._ajax_post(
             "selectedYearType", "selectedYearType", "selectedYearType selectedYear",
-            {"selectedYearType_input": "C"},
+            {"selectedYearType_input": year_type},
         )
         time.sleep(0.5)
 
-        # 6. Set year
+        # 6. Set year (string value - could be "2026" or "2024-2025" for FY)
+        year_val = config.get("year_value", str(year))
         self._ajax_post(
             "selectedYear", "selectedYear", "selectedYear",
-            {"selectedYear_input": str(year)},
+            {"selectedYear_input": year_val},
         )
         time.sleep(0.5)
 
-        # 7. Checkbox filters removed — Vahan portal ignores VhClass/fuel
-        # checkbox POST values (refresh button has no PrimeFaces 'p' param).
-        # Category filtering is now done via Y-axis mapping instead.
+        # 7. Set checkbox filters (VhClass, fuel) if present in config.
+        # The Vahan portal DOES respect checkbox filters when they are
+        # included as repeated form params in the refresh POST.
+        # Format: VhClass=7&VhClass=71 (requests handles list values).
+        if 'vehicle_class' in config or 'fuel' in config:
+            self._set_checkbox_filters(config)
+            logger.info(f"Checkbox filters set: {list(self._checkbox_values.keys())}")
 
     def _set_checkbox_filters(self, config):
         """Resolve checkbox filter labels to form values.
@@ -440,21 +456,26 @@ class VahanHttpScraper:
             "selectedRto_input": "-1",
             "yaxisVar_input": config.get("y_axis", "Maker"),
             "xaxisVar_input": config.get("x_axis", "Month Wise"),
-            "selectedYearType_input": "C",
-            "selectedYear_input": str(year),
+            "selectedYearType_input": config.get("year_type", "C"),
+            "selectedYear_input": config.get("year_value", str(year)),
         }
 
         if self._number_format_id:
             form_data[f"{self._number_format_id}_input"] = "A"
         if self._state_id:
-            form_data[f"{self._state_id}_input"] = state_code
+            state_val = state_code if state_code else "-1"
+            form_data[f"{self._state_id}_input"] = state_val
 
-        # NOTE: Checkbox filters (VhClass, fuel) are NOT included — the Vahan
-        # portal's refresh button PrimeFaces config has no 'p' (process) param,
-        # so the server ignores checkbox POST values entirely.
+        # Include checkbox filter values as repeated form params.
+        # requests.post(data={...}) handles list values correctly:
+        #   {"VhClass": ["7", "71"]} -> VhClass=7&VhClass=71
+        if hasattr(self, '_checkbox_values') and self._checkbox_values:
+            for panel_name, values in self._checkbox_values.items():
+                form_data[panel_name] = values
+            logger.info(f"Checkbox filters in form: {self._checkbox_values}")
 
         # Try known refresh button IDs
-        for btn_id in ["j_idt84", "j_idt93", "j_idt103", "j_idt61", "j_idt59"]:
+        for btn_id in ["j_idt69", "j_idt76", "j_idt85", "j_idt84", "j_idt93", "j_idt103", "j_idt61", "j_idt59"]:
             try:
                 resp = self._button_post(btn_id, form_data)
                 if self._has_data_table(resp):
@@ -1593,6 +1614,765 @@ class VahanHttpScraper:
                 f"Initial error: {original_error_msg}\n\n"
                 f"Retry without SSL also failed: {str(retry_err)[:150]}"
             )
+
+
+    # -- National-level scraping methods ----------------------------------------
+    # These scrape Maker x (VehCat/Fuel/VehClass) for All States (national data).
+
+    def _switch_table_month(self, current_html, month_label):
+        """Switch the in-table month dropdown to a specific month.
+
+        The Vahan portal data table has year and month dropdowns above
+        the table that filter the displayed data via AJAX. These dropdowns
+        are inside the AJAX-loaded table area (CDATA blocks).
+
+        Args:
+            current_html: Current page HTML (to discover dropdown IDs)
+            month_label: Month value to select (e.g. 'JAN', 'FEB', or 'All')
+
+        Returns: Updated HTML after month switch
+        """
+        # Search both raw HTML and CDATA blocks for the month dropdown
+        search_texts = [current_html]
+        cdata_blocks = re.findall(r'<!\[CDATA\[(.*?)\]\]>', current_html, re.DOTALL)
+        if cdata_blocks:
+            search_texts.append(" ".join(cdata_blocks))
+
+        month_select_id = None
+        for search in search_texts:
+            selects = re.findall(r'<select[^>]*id="([^"]*)"[^>]*>(.*?)</select>',
+                                  search, re.DOTALL)
+            for sel_id, sel_content in selects:
+                # Month dropdown has JAN/FEB/DEC or month names as options
+                if ('JAN' in sel_content and 'FEB' in sel_content and 'DEC' in sel_content):
+                    month_select_id = sel_id.replace("_input", "")
+                    break
+                # Also check for "All" option with month names
+                if ('All' in sel_content and 'JAN' in sel_content):
+                    month_select_id = sel_id.replace("_input", "")
+                    break
+            if month_select_id:
+                break
+
+        if not month_select_id:
+            # Try known patterns for the month dropdown ID
+            combined = " ".join(search_texts)
+            for pattern in [r'id="([^"]*(?:Month|month|selectMonth)[^"]*_input)"']:
+                m = re.search(pattern, combined)
+                if m:
+                    month_select_id = m.group(1).replace("_input", "")
+                    logger.info(f"Found month dropdown via pattern: {month_select_id}")
+                    break
+
+        if not month_select_id:
+            logger.warning("Could not find month dropdown; using unfiltered data")
+            return current_html
+
+        # Discover the correct render target from the onchange handler
+        # PrimeFaces.ab({s:"groupingTable:selectMonth", u:"combTablePnl", ...})
+        render_target = None
+        combined = " ".join(search_texts)
+        # Look for u:"<target>" in the onchange PrimeFaces.ab() config
+        m = re.search(
+            r'selectMonth[^>]*onchange="[^"]*u:&quot;([^&]+)&quot;',
+            combined
+        )
+        if m:
+            render_target = m.group(1)
+            logger.info(f"Month dropdown render target from onchange: {render_target}")
+        else:
+            render_target = "combTablePnl"  # Known default from portal HTML
+            logger.info(f"Using default render target: {render_target}")
+
+        # Discover the correct option VALUE for this month label.
+        # The dropdown options use YYYYMM format (e.g. "202504" for APR 2025),
+        # not the label text ("APR"). We need to find the value matching our label.
+        month_value = month_label  # fallback to label if value not found
+        for search in search_texts:
+            # Find the selectMonth <select> and its <option> elements
+            sel_pattern = re.compile(
+                r'<select[^>]*selectMonth[^>]*>(.*?)</select>', re.DOTALL)
+            sel_match = sel_pattern.search(search)
+            if sel_match:
+                sel_html = sel_match.group(1)
+                # Match options: <option value="202504">APR</option>
+                opts = re.findall(
+                    r'<option[^>]*value="([^"]*)"[^>]*>\s*' + re.escape(month_label) + r'\s*</option>',
+                    sel_html, re.IGNORECASE)
+                if opts:
+                    month_value = opts[0]
+                    logger.info(f"Month dropdown: label={month_label} -> value={month_value}")
+                    break
+                # Also try matching just the text content
+                opts2 = re.findall(r'<option[^>]*value="([^"]*)"[^>]*>([^<]*)</option>', sel_html)
+                for val, text in opts2:
+                    if text.strip().upper() == month_label.upper():
+                        month_value = val
+                        logger.info(f"Month dropdown: label={month_label} -> value={month_value}")
+                        break
+                if month_value != month_label:
+                    break
+
+        logger.info(f"Switching table month to {month_label} (value={month_value}, "
+                    f"dropdown={month_select_id}, render={render_target})")
+
+        # Build AJAX params matching the browser's PrimeFaces.ab() call
+        # Include all saved form fields so the server knows current filter state
+        ajax_data = {
+            "javax.faces.partial.ajax": "true",
+            "javax.faces.source": month_select_id,
+            "javax.faces.partial.execute": month_select_id,
+            "javax.faces.partial.render": render_target,
+            "javax.faces.behavior.event": "change",
+            "javax.faces.partial.event": "change",
+            "masterLayout_formlogin": "masterLayout_formlogin",
+            f"{month_select_id}_input": month_value,
+            "javax.faces.ViewState": self.viewstate,
+        }
+        # Include saved form params (carries current filter state: year, state, axes)
+        if self._last_form_params:
+            for k, v in self._last_form_params.items():
+                if k not in ajax_data and k != 'javax.faces.ViewState':
+                    ajax_data[k] = v
+        # Override the month value explicitly
+        ajax_data[f"{month_select_id}_input"] = month_value
+
+        resp = self.session.post(self.form_url, data=ajax_data, timeout=self.timeout, headers={
+            "Faces-Request": "partial/ajax",
+            "X-Requested-With": "XMLHttpRequest",
+        })
+        resp.raise_for_status()
+
+        # Update ViewState
+        new_vs = self._extract_viewstate(resp.text)
+        if new_vs:
+            self.viewstate = new_vs
+
+        time.sleep(1.5)
+
+        def _update_month_in_params(mlabel):
+            """Update saved form params so subsequent pagination carries the month filter."""
+            # Update the month value in _last_form_params (used by _fetch_datatable_page)
+            self._last_form_params[f"{month_select_id}_input"] = month_value
+            logger.info(f"Updated _last_form_params[{month_select_id}_input] = {month_value}")
+            # Also re-extract form fields from the new response to pick up any changes
+            new_fields = self._extract_all_form_fields(resp.text)
+            if new_fields:
+                for k, v in new_fields.items():
+                    self._last_form_params[k] = v
+                # Ensure month is set to what we requested (override any default)
+                self._last_form_params[f"{month_select_id}_input"] = month_value
+
+        if self._has_data_table(resp.text):
+            logger.info(f"Month switch to {month_label}: got data table ({len(resp.text)} chars)")
+            _update_month_in_params(month_label)
+            return resp.text
+
+        # Check CDATA blocks for table data
+        import re as re2
+        cdata_blocks = re2.findall(r'<!\[CDATA\[(.*?)\]\]>', resp.text, re2.DOTALL)
+        for block in cdata_blocks:
+            if '<tbody' in block and '<td' in block:
+                logger.info(f"Month switch to {month_label}: found table in CDATA ({len(block)} chars)")
+                _update_month_in_params(month_label)
+                return resp.text
+
+        logger.warning(f"Month switch to {month_label} returned no data table ({len(resp.text)} chars)")
+        return current_html
+
+    def _scrape_raw_national(self, year, y_axis='Maker', x_axis='Vehicle Category',
+                              year_type='F', year_value=None, month_label=None,
+                              checkbox_filters=None):
+        """Scrape national data: All States, specified Y and X axes.
+
+        The portal has an in-table month dropdown for VehCat/Fuel/VehClass views
+        (visible after clicking Refresh). Use Calendar Year mode and switch the
+        month dropdown to get per-month data.
+
+        Args:
+            year: Calendar or FY start year (used for logging)
+            y_axis: Y-axis dropdown value (default 'Maker')
+            x_axis: X-axis dropdown value ('Vehicle Category', 'Fuel',
+                    'Vehicle Class', 'Month Wise')
+            year_type: 'C' for Calendar Year, 'F' for Financial Year
+            year_value: Exact dropdown value (e.g. '2024-2025' for FY)
+            month_label: If set, switch in-table month dropdown to this value
+                         (e.g. 'JAN', 'FEB'). None = use default ('All').
+            checkbox_filters: Optional dict of checkbox filters to apply.
+                         Keys: 'vehicle_class' (list), 'fuel' (list).
+                         Values are label strings matching portal options.
+
+        Returns list of dicts: [{oem_raw, month_label (column header), volume}, ...]
+        """
+        if year_value is None:
+            year_value = str(year)
+
+        config = {
+            'y_axis': y_axis,
+            'x_axis': x_axis,
+            'year_type': year_type,
+            'year_value': year_value,
+        }
+        if checkbox_filters:
+            config.update(checkbox_filters)
+
+        # Reset session
+        self._page_loaded = False
+        self._load_page()
+
+        # Set filters with state_code=None for All States
+        self._set_filters(None, year, config)
+
+        # Click refresh
+        response_html = self._find_and_click_refresh(None, year, config)
+
+        # If specific month requested, switch the in-table month dropdown
+        if month_label:
+            response_html = self._switch_table_month(response_html, month_label)
+
+        # Parse table (columns are veh categories / fuel types / months)
+        first_page = self._extract_table(response_html)
+        logger.info(f'_scrape_raw_national({x_axis}, {year_value}, month={month_label}): '
+                    f'first page {len(first_page)} records')
+
+        all_records = self._fetch_all_datatable_rows(response_html, first_page)
+        logger.info(f'_scrape_raw_national: total {len(all_records)} records')
+        return all_records
+
+    def scrape_national_vehcat(self, fy_start_year, month_num=None):
+        """Scrape Maker x Vehicle Category for a specific month or full year.
+
+        Uses Calendar Year mode with the in-table month dropdown to get
+        per-month OEM x VehCat data. If month_num is None, returns the
+        full-year aggregate (dropdown set to 'All').
+
+        Args:
+            fy_start_year: FY start year (e.g. 2024 for FY25 = Apr 2024 - Mar 2025)
+            month_num: Calendar month (1-12). None = full year aggregate.
+
+        Returns: list of dicts [{oem_raw, month_label (veh cat code), volume}]
+        """
+        if month_num is None:
+            # Annual aggregate using FY mode
+            fy_value = FY_DROPDOWN_VALUES.get(
+                fy_start_year, f"{fy_start_year}-{fy_start_year+1}")
+            return self._scrape_raw_national(
+                year=fy_start_year, y_axis='Maker', x_axis='Vehicle Category',
+                year_type='F', year_value=fy_value,
+            )
+        # Monthly: use CY mode + in-table month dropdown
+        cal_year = fy_start_year if month_num >= 4 else fy_start_year + 1
+        month_label = MONTH_DROPDOWN_MAP[month_num]
+        return self._scrape_raw_national(
+            year=cal_year, y_axis='Maker', x_axis='Vehicle Category',
+            year_type='C', year_value=str(cal_year), month_label=month_label,
+        )
+
+    def scrape_national_fuel(self, fy_start_year, month_num=None):
+        """Scrape Maker x Fuel for a specific month or full year.
+
+        Uses Calendar Year mode with the in-table month dropdown.
+
+        Args:
+            fy_start_year: FY start year
+            month_num: Calendar month (1-12). None = full year aggregate.
+        """
+        if month_num is None:
+            fy_value = FY_DROPDOWN_VALUES.get(
+                fy_start_year, f"{fy_start_year}-{fy_start_year+1}")
+            return self._scrape_raw_national(
+                year=fy_start_year, y_axis='Maker', x_axis='Fuel',
+                year_type='F', year_value=fy_value,
+            )
+        cal_year = fy_start_year if month_num >= 4 else fy_start_year + 1
+        month_label = MONTH_DROPDOWN_MAP[month_num]
+        return self._scrape_raw_national(
+            year=cal_year, y_axis='Maker', x_axis='Fuel',
+            year_type='C', year_value=str(cal_year), month_label=month_label,
+        )
+
+    def scrape_national_vehclass(self, fy_start_year, month_num=None):
+        """Scrape Maker x Vehicle Class for a specific month or full year.
+
+        Uses Calendar Year mode with the in-table month dropdown.
+
+        Args:
+            fy_start_year: FY start year
+            month_num: Calendar month (1-12). None = full year aggregate.
+        """
+        if month_num is None:
+            fy_value = FY_DROPDOWN_VALUES.get(
+                fy_start_year, f"{fy_start_year}-{fy_start_year+1}")
+            return self._scrape_raw_national(
+                year=fy_start_year, y_axis='Maker', x_axis='Vehicle Class',
+                year_type='F', year_value=fy_value,
+            )
+        cal_year = fy_start_year if month_num >= 4 else fy_start_year + 1
+        month_label = MONTH_DROPDOWN_MAP[month_num]
+        return self._scrape_raw_national(
+            year=cal_year, y_axis='Maker', x_axis='Vehicle Class',
+            year_type='C', year_value=str(cal_year), month_label=month_label,
+        )
+
+
+
+    def scrape_national_subsegment(self, fy_start_year, subsegment_code, month_num=None):
+        """Scrape per-OEM monthly data for a subsegment using checkbox filters.
+
+        Subsegments combine vehicle_class + fuel checkbox filters to get
+        cross-tabulated data (e.g. EV within PV, CNG within PV).
+
+        Uses VAHAN_SCRAPE_CONFIGS from config/settings.py which defines
+        the checkbox filter labels for each subsegment code.
+
+        Args:
+            fy_start_year: FY start year (e.g. 2024 for FY25)
+            subsegment_code: One of: EV_PV, EV_2W, EV_3W, PV_CNG, PV_HYBRID
+            month_num: Calendar month (1-12). None = full year aggregate.
+
+        Returns: list of dicts [{oem_raw, month_label, volume}]
+        """
+        from config.settings import VAHAN_SCRAPE_CONFIGS, FY_DROPDOWN_VALUES, MONTH_DROPDOWN_MAP
+
+        if subsegment_code not in VAHAN_SCRAPE_CONFIGS:
+            raise ValueError(f"Unknown subsegment: {subsegment_code}. "
+                             f"Available: {list(VAHAN_SCRAPE_CONFIGS.keys())}")
+
+        cfg = VAHAN_SCRAPE_CONFIGS[subsegment_code]
+        checkbox_filters = {}
+        if 'vehicle_class' in cfg:
+            checkbox_filters['vehicle_class'] = cfg['vehicle_class']
+        if 'fuel' in cfg:
+            checkbox_filters['fuel'] = cfg['fuel']
+
+        if not checkbox_filters:
+            raise ValueError(f"Subsegment {subsegment_code} has no checkbox filters defined!")
+
+        if month_num is None:
+            # Annual aggregate using FY mode
+            fy_value = FY_DROPDOWN_VALUES.get(
+                fy_start_year, f"{fy_start_year}-{fy_start_year+1}")
+            return self._scrape_raw_national(
+                year=fy_start_year, y_axis='Maker', x_axis='Month Wise',
+                year_type='F', year_value=fy_value,
+                checkbox_filters=checkbox_filters,
+            )
+
+        # Monthly: use CY mode + in-table month dropdown
+        cal_year = fy_start_year if month_num >= 4 else fy_start_year + 1
+        month_label = MONTH_DROPDOWN_MAP[month_num]
+        return self._scrape_raw_national(
+            year=cal_year, y_axis='Maker', x_axis='Month Wise',
+            year_type='C', year_value=str(cal_year), month_label=month_label,
+            checkbox_filters=checkbox_filters,
+        )
+
+    def _store_national_subsegment(self, conn, records, fy_start_year,
+                                    subsegment_code, month):
+        """Store subsegment OEM data into national_oem_subsegment table.
+
+        Args:
+            conn: SQLite connection
+            records: list of dicts from scrape_national_subsegment()
+            fy_start_year: FY start year
+            subsegment_code: e.g. 'EV_PV', 'PV_CNG'
+            month: Calendar month (1-12) or 0 for annual
+
+        Returns: number of rows upserted
+        """
+        from config.oem_normalization import normalize_oem
+        from datetime import datetime
+
+        cursor = conn.cursor()
+
+        # Ensure table exists
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS national_oem_subsegment (
+                oem_name TEXT NOT NULL,
+                subsegment_code TEXT NOT NULL,
+                year INTEGER NOT NULL,
+                month INTEGER NOT NULL,
+                volume REAL DEFAULT 0,
+                updated_at TEXT,
+                PRIMARY KEY (oem_name, subsegment_code, year, month)
+            )
+        """)
+
+        # Determine calendar year from FY + month
+        if month and month >= 4:
+            cal_year = fy_start_year
+        elif month:
+            cal_year = fy_start_year + 1
+        else:
+            cal_year = fy_start_year  # annual
+
+        now = datetime.now().isoformat()
+        rows = 0
+
+        # Aggregate by OEM (month_label column is the month from X-axis)
+        from collections import defaultdict
+        oem_totals = defaultdict(float)
+        for rec in records:
+            oem_raw = rec.get('oem_raw', '')
+            volume = rec.get('volume', 0)
+            if not oem_raw or volume == 0:
+                continue
+            oem = normalize_oem(oem_raw, subsegment_code)
+            if oem:
+                oem_totals[oem] += volume
+
+        for oem, volume in oem_totals.items():
+            cursor.execute("""
+                INSERT INTO national_oem_subsegment
+                    (oem_name, subsegment_code, year, month, volume, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(oem_name, subsegment_code, year, month)
+                DO UPDATE SET volume=excluded.volume, updated_at=excluded.updated_at
+            """, (oem, subsegment_code, cal_year, month, volume, now))
+            rows += 1
+
+        conn.commit()
+        return rows
+
+
+    def scrape_national_monthly(self, fy_start_year):
+        """Scrape Maker x Month Wise for national monthly OEM totals.
+
+        IMPORTANT: Month Wise X-axis only works with Calendar Year mode,
+        not Financial Year mode. An FY (Apr-Mar) spans two calendar years,
+        so we scrape both CYs and combine:
+          FY25 = CY2024 (months 4-12) + CY2025 (months 1-3)
+
+        Args:
+            fy_start_year: FY start year (e.g. 2024 for FY25)
+
+        Returns: list of dicts [{oem_raw, month_label (e.g. 'JAN'), volume}]
+                 with records from both calendar years
+        """
+        all_records = []
+
+        # Part 1: CY = fy_start_year (months Apr-Dec)
+        logger.info(f"Monthly scrape: CY{fy_start_year} for FY{str(fy_start_year+1)[-2:]} Apr-Dec")
+        records_cy1 = self._scrape_raw_national(
+            year=fy_start_year,
+            y_axis='Maker',
+            x_axis='Month Wise',
+            year_type='C',
+            year_value=str(fy_start_year),
+        )
+        # Filter to only FY months (Apr=4 through Dec=12)
+        FY_MONTHS_CY1 = {'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'}
+        for rec in records_cy1:
+            if rec['month_label'].strip().upper() in FY_MONTHS_CY1:
+                all_records.append(rec)
+        logger.info(f"  CY{fy_start_year}: {len(records_cy1)} raw -> {len(all_records)} FY-filtered")
+
+        # Part 2: CY = fy_start_year + 1 (months Jan-Mar)
+        cy2 = fy_start_year + 1
+        logger.info(f"Monthly scrape: CY{cy2} for FY{str(fy_start_year+1)[-2:]} Jan-Mar")
+        records_cy2 = self._scrape_raw_national(
+            year=cy2,
+            y_axis='Maker',
+            x_axis='Month Wise',
+            year_type='C',
+            year_value=str(cy2),
+        )
+        # Filter to only FY months (Jan-Mar)
+        FY_MONTHS_CY2 = {'JAN', 'FEB', 'MAR'}
+        count_before = len(all_records)
+        for rec in records_cy2:
+            if rec['month_label'].strip().upper() in FY_MONTHS_CY2:
+                all_records.append(rec)
+        logger.info(f"  CY{cy2}: {len(records_cy2)} raw -> {len(all_records) - count_before} FY-filtered")
+
+        logger.info(f"Monthly scrape FY{str(fy_start_year+1)[-2:]}: total {len(all_records)} records")
+        return all_records
+
+    def _store_national_vehcat(self, conn, records, fy_start_year, month_num):
+        """Store Maker x VehCat records into national_oem_vehcat."""
+        cursor = conn.cursor()
+        rows = 0
+        # Determine calendar year from FY + month
+        # month_num=0 means annual aggregate; months 4-12 are in fy_start_year, 1-3 in next year
+        cal_year = fy_start_year if (month_num == 0 or month_num >= 4) else fy_start_year + 1
+
+        for rec in records:
+            oem_raw = rec['oem_raw']
+            oem_name = normalize_oem(oem_raw) or oem_raw
+            col_label = rec['month_label'].strip()  # Veh category code
+            if col_label.upper() == 'TOTAL':
+                continue  # Skip the row-total column
+            cat_group = VEHCAT_TO_CATEGORY.get(col_label, 'OTHERS')
+            volume = rec['volume']
+
+            cursor.execute("""
+                INSERT INTO national_oem_vehcat
+                    (oem_name, oem_raw, veh_category, category_group,
+                     year, month, volume)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(oem_raw, veh_category, year, month)
+                DO UPDATE SET oem_name=excluded.oem_name,
+                              category_group=excluded.category_group,
+                              volume=excluded.volume,
+                              scraped_at=CURRENT_TIMESTAMP
+            """, (oem_name, oem_raw, col_label, cat_group,
+                  cal_year, month_num, volume))
+            rows += 1
+        conn.commit()
+        logger.info(f"Stored {rows} national vehcat records for {month_num}/{cal_year}")
+        return rows
+
+    def _store_national_fuel(self, conn, records, fy_start_year, month_num):
+        """Store Maker x Fuel records into national_oem_fuel."""
+        cursor = conn.cursor()
+        rows = 0
+        # month_num=0 means annual aggregate; months 4-12 are in fy_start_year, 1-3 in next year
+        cal_year = fy_start_year if (month_num == 0 or month_num >= 4) else fy_start_year + 1
+
+        for rec in records:
+            oem_raw = rec['oem_raw']
+            oem_name = normalize_oem(oem_raw) or oem_raw
+            fuel_type = rec['month_label'].strip()
+            if fuel_type.upper() == 'TOTAL':
+                continue  # Skip the row-total column
+            fuel_group = FUEL_TO_GROUP.get(fuel_type, 'Others')
+            volume = rec['volume']
+
+            cursor.execute("""
+                INSERT INTO national_oem_fuel
+                    (oem_name, oem_raw, fuel_type, fuel_group,
+                     year, month, volume)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(oem_raw, fuel_type, year, month)
+                DO UPDATE SET oem_name=excluded.oem_name,
+                              fuel_group=excluded.fuel_group,
+                              volume=excluded.volume,
+                              scraped_at=CURRENT_TIMESTAMP
+            """, (oem_name, oem_raw, fuel_type, fuel_group,
+                  cal_year, month_num, volume))
+            rows += 1
+        conn.commit()
+        logger.info(f"Stored {rows} national fuel records for {month_num}/{cal_year}")
+        return rows
+
+    def _store_national_vehclass(self, conn, records, fy_start_year, month_num):
+        """Store Maker x VehClass records into national_oem_vehclass."""
+        cursor = conn.cursor()
+        rows = 0
+        # month_num=0 means annual aggregate; months 4-12 are in fy_start_year, 1-3 in next year
+        cal_year = fy_start_year if (month_num == 0 or month_num >= 4) else fy_start_year + 1
+
+        for rec in records:
+            oem_raw = rec['oem_raw']
+            oem_name = normalize_oem(oem_raw) or oem_raw
+            veh_class = rec['month_label'].strip()
+            if veh_class.upper() == 'TOTAL':
+                continue  # Skip the row-total column
+            class_group = VEHCLASS_TO_NATIONAL.get(veh_class, 'OTHERS')
+            volume = rec['volume']
+
+            cursor.execute("""
+                INSERT INTO national_oem_vehclass
+                    (oem_name, oem_raw, veh_class, class_group,
+                     year, month, volume)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(oem_raw, veh_class, year, month)
+                DO UPDATE SET oem_name=excluded.oem_name,
+                              class_group=excluded.class_group,
+                              volume=excluded.volume,
+                              scraped_at=CURRENT_TIMESTAMP
+            """, (oem_name, oem_raw, veh_class, class_group,
+                  cal_year, month_num, volume))
+            rows += 1
+        conn.commit()
+        logger.info(f"Stored {rows} national vehclass records for {month_num}/{cal_year}")
+        return rows
+
+    def _store_national_monthly(self, conn, records, fy_start_year):
+        """Store OEM x Month national data into national_monthly table.
+
+        Uses the existing national_monthly table (shared with Excel data).
+        Scraped data uses category_code='__ALL__' (cross-category OEM totals)
+        and source='scrape' to distinguish from Excel-sourced rows.
+
+        Converts month labels (APR, MAY, ...) to calendar year/month,
+        normalizes OEM names, and upserts into the database.
+
+        Args:
+            conn: SQLite connection
+            records: List of {oem_raw, month_label, volume}
+            fy_start_year: FY start year
+
+        Returns: Number of rows upserted
+        """
+        from config.oem_normalization import normalize_oem
+
+        MONTH_LABEL_TO_NUM = {
+            'JAN': 1, 'FEB': 2, 'MAR': 3, 'APR': 4, 'MAY': 5, 'JUN': 6,
+            'JUL': 7, 'AUG': 8, 'SEP': 9, 'OCT': 10, 'NOV': 11, 'DEC': 12,
+        }
+
+        # Aggregate by normalized OEM + month (multiple raw entities may map to same OEM)
+        from collections import defaultdict
+        agg = defaultdict(int)  # (oem_name, cal_year, month_num) -> volume
+
+        for rec in records:
+            month_label = rec['month_label'].strip().upper()
+            if month_label == 'TOTAL':
+                continue
+
+            month_num = MONTH_LABEL_TO_NUM.get(month_label)
+            if not month_num:
+                logger.warning(f"Unknown month label: {month_label}")
+                continue
+
+            # Convert FY month to calendar year
+            # Convert FY month to calendar year
+            cal_year = fy_start_year if (month_num == 0 or month_num >= 4) else fy_start_year + 1
+
+            oem_raw = rec['oem_raw']
+            oem_name = normalize_oem(oem_raw)
+            volume = rec['volume']
+
+            if volume == 0:
+                continue
+
+            agg[(oem_name, cal_year, month_num)] += volume
+
+        rows = 0
+        for (oem_name, cal_year, month_num), volume in agg.items():
+            conn.execute("""
+                INSERT INTO national_monthly
+                    (category_code, oem_name, year, month, volume, source, updated_at)
+                VALUES ('__ALL__', ?, ?, ?, ?, 'scrape', datetime('now'))
+                ON CONFLICT(category_code, oem_name, year, month)
+                DO UPDATE SET volume=excluded.volume,
+                              source=excluded.source,
+                              updated_at=excluded.updated_at
+            """, (oem_name, cal_year, month_num, volume))
+            rows += 1
+
+        conn.commit()
+        logger.info(f"Stored {rows} national monthly rows for FY{str(fy_start_year+1)[-2:]}")
+        return rows
+
+    def scrape_and_store_national(self, fy_start_year, month_num=None,
+                                   scrape_types=('vehcat', 'fuel', 'vehclass')):
+        """Scrape and store national OEM data for a financial year.
+
+        VehCat/Fuel/VehClass types support both annual aggregates (month_num=None)
+        and per-month data (month_num=1-12) using the in-table month dropdown.
+        The 'monthly' type (Y=Maker, X=Month Wise) always gives all 12 months.
+
+        Args:
+            fy_start_year: FY start year (e.g. 2024 for FY25)
+            month_num: Calendar month (1-12) for per-month VehCat/Fuel/VehClass.
+                       None or 0 = annual aggregate.
+                       Ignored for 'monthly' type (months come from X-axis).
+            scrape_types: Which scrapes to run. Options:
+                - 'vehcat': Y=Maker x X=Vehicle Category
+                - 'fuel': Y=Maker x X=Fuel
+                - 'vehclass': Y=Maker x X=Vehicle Class
+                - 'monthly': Y=Maker x X=Month Wise (cross-category monthly)
+
+        Returns: total rows upserted
+        """
+        conn = get_connection()
+        cursor = conn.cursor()
+        total_rows = 0
+
+        # For annual types, store with month=0 as sentinel
+        # For monthly type, months come from the column headers
+        meta_month = month_num if month_num else 0
+
+        # month_num: 1-12 for per-month data, None/0 for annual aggregate
+        m = month_num if month_num else None
+
+        type_configs = {
+            'vehcat': (
+                'national_vehcat',
+                lambda: self.scrape_national_vehcat(fy_start_year, m),
+                lambda recs: self._store_national_vehcat(conn, recs, fy_start_year,
+                                                          month_num if month_num else 0),
+            ),
+            'fuel': (
+                'national_fuel',
+                lambda: self.scrape_national_fuel(fy_start_year, m),
+                lambda recs: self._store_national_fuel(conn, recs, fy_start_year,
+                                                        month_num if month_num else 0),
+            ),
+            'vehclass': (
+                'national_vehclass',
+                lambda: self.scrape_national_vehclass(fy_start_year, m),
+                lambda recs: self._store_national_vehclass(conn, recs, fy_start_year,
+                                                            month_num if month_num else 0),
+            ),
+            'monthly': (
+                'national_monthly',
+                lambda: self.scrape_national_monthly(fy_start_year),
+                lambda recs: self._store_national_monthly(conn, recs, fy_start_year),
+            ),
+        }
+
+        # Add subsegment types dynamically from VAHAN_SCRAPE_CONFIGS
+        from config.settings import VAHAN_SCRAPE_CONFIGS
+        SUBSEGMENT_CODES = ['EV_PV', 'EV_2W', 'EV_3W', 'PV_CNG', 'PV_HYBRID',
+                            'PV', '2W', '3W', 'TRACTORS']
+        for sub_code in SUBSEGMENT_CODES:
+            if sub_code in VAHAN_SCRAPE_CONFIGS:
+                sc = sub_code  # capture for lambda
+                type_configs[f'sub_{sub_code.lower()}'] = (
+                    f'national_sub_{sub_code.lower()}',
+                    lambda _sc=sc: self.scrape_national_subsegment(
+                        fy_start_year, _sc, month_num if month_num else None),
+                    lambda recs, _sc=sc: self._store_national_subsegment(
+                        conn, recs, fy_start_year, _sc,
+                        month_num if month_num else 0),
+                )
+
+        for stype in scrape_types:
+            if stype not in type_configs:
+                logger.warning(f"Unknown scrape type: {stype}")
+                continue
+            meta_type, scrape_fn, store_fn = type_configs[stype]
+
+            # Log start in scrape_metadata
+            cursor.execute("""
+                INSERT INTO scrape_metadata
+                    (scrape_type, year, month, started_at, status)
+                VALUES (?, ?, ?, ?, 'running')
+                ON CONFLICT(scrape_type, year, month, state)
+                DO UPDATE SET started_at=excluded.started_at, status='running'
+            """, (meta_type, fy_start_year, meta_month, datetime.now().isoformat()))
+            conn.commit()
+
+            try:
+                records = scrape_fn()
+                rows = store_fn(records)
+                total_rows += rows
+
+                cursor.execute("""
+                    UPDATE scrape_metadata
+                    SET completed_at=?, rows_upserted=?, status='completed'
+                    WHERE scrape_type=? AND year=? AND month=?
+                """, (datetime.now().isoformat(), rows,
+                      meta_type, fy_start_year, meta_month))
+                conn.commit()
+                logger.info(f"National {stype} FY{str(fy_start_year+1)[-2:]}: {rows} rows stored")
+
+            except Exception as e:
+                cursor.execute("""
+                    UPDATE scrape_metadata
+                    SET completed_at=?, status='failed'
+                    WHERE scrape_type=? AND year=? AND month=?
+                """, (datetime.now().isoformat(),
+                      meta_type, fy_start_year, meta_month))
+                conn.commit()
+                logger.error(f"National {stype} FY{str(fy_start_year+1)[-2:]}: {e}")
+                raise
+
+        conn.close()
+        return total_rows
 
 
 def _parse_month(label):

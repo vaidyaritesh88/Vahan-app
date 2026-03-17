@@ -37,8 +37,27 @@ def category_selector(key="category", include_subsegments=False, label="Select C
     return options[selected]
 
 
+# Major OEMs to show at top of dropdown (ordered by industry importance)
+PRIORITY_OEMS = [
+    # PV
+    "Maruti Suzuki", "Hyundai", "Tata Motors", "Mahindra", "Toyota",
+    "Kia", "Honda Cars", "MG Motor", "Skoda", "Volkswagen",
+    # 2W
+    "Hero MotoCorp", "Honda 2W", "TVS Motor", "Bajaj Auto",
+    "Royal Enfield", "Suzuki 2W", "Yamaha",
+    # EV 2W
+    "Ola Electric", "Ather Energy",
+    # CV
+    "Ashok Leyland", "VECV", "Force Motors",
+    # Tractor
+    "Mahindra Tractors", "Sonalika", "Escorts", "TAFE", "John Deere",
+    # 3W
+    "Piaggio",
+]
+
+
 def oem_selector(category_code=None, key="oem", label="Select OEM"):
-    """OEM dropdown. Returns OEM name."""
+    """OEM dropdown with major OEMs listed first, then alphabetical."""
     if category_code:
         oems = get_all_oems_for_category(category_code)
     else:
@@ -47,7 +66,22 @@ def oem_selector(category_code=None, key="oem", label="Select OEM"):
     if not oems:
         return None
 
-    return st.sidebar.selectbox(label, oems, key=key)
+    oem_set = set(oems)
+    # Priority OEMs that exist in data, in defined order
+    top = [o for o in PRIORITY_OEMS if o in oem_set]
+    # Remaining OEMs alphabetically
+    rest = sorted([o for o in oems if o not in set(top)])
+    # Combine with separator
+    if top and rest:
+        ordered = top + ["─" * 30] + rest  # horizontal line separator
+    else:
+        ordered = top + rest
+
+    selected = st.sidebar.selectbox(label, ordered, key=key)
+    # If user somehow selects the separator, default to first OEM
+    if selected and "─" in selected:
+        selected = ordered[0]
+    return selected
 
 
 def top_n_selector(key="top_n", default=10):
@@ -85,7 +119,10 @@ def base_category_selector(key="base_cat"):
 
 
 def period_selector(key="period_preset", label="Analysis Period"):
-    """Period preset selector. Returns (preset_name, year, month) for the reference month."""
+    """Period preset selector. Returns (preset_name, year, month) for the reference month.
+
+    Defaults to last COMPLETED month (not current month which may have partial data).
+    """
     months = get_available_months()
     if not months:
         st.sidebar.warning("No data loaded yet.")
@@ -93,9 +130,19 @@ def period_selector(key="period_preset", label="Analysis Period"):
 
     preset = st.sidebar.selectbox(label, list(PERIOD_PRESETS.keys()), key=f"{key}_preset")
 
+    # Default to last completed month (skip current month if it's in the list)
+    from datetime import date as _date
+    _today = _date.today()
+    default_idx = 0
+    for i, (y, m) in enumerate(months):
+        if y == _today.year and m == _today.month:
+            continue  # Skip current (partial) month
+        default_idx = i
+        break
+
     # Reference month selector
     options = [f"{format_month(y, m)}" for y, m in months]
-    selected = st.sidebar.selectbox("Reference Month", options, key=f"{key}_ref")
+    selected = st.sidebar.selectbox("Reference Month", options, index=default_idx, key=f"{key}_ref")
     idx = options.index(selected)
     year, month = months[idx]
 

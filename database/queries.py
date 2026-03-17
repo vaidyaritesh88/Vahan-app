@@ -1180,3 +1180,263 @@ def aggregate_state_to_national():
     conn.commit()
     conn.close()
     return rows
+
+
+
+
+# ── OEM 360 queries (scraped vehcat as single source of truth) ─────────
+
+# Map vehcat category_group -> base app category
+VEHCAT_TO_BASE = {
+    "PV": "PV", "2W": "2W", "3W": "3W",
+    "LCV": "CV", "MHCV": "CV", "BUS": "CV",
+    "TRACTOR": "TRACTORS",
+    "OTHERS": "OTHERS",
+}
+
+
+def get_oem_total_monthly_scraped(oem_name):
+    """Get OEM's total monthly volume from scraped vehcat data.
+
+    Returns DataFrame: year, month, volume (summed across all vehicle categories).
+    Uses month > 0 (actual monthly data, not annual aggregates).
+    """
+    return _query_df("""
+        SELECT year, month, SUM(volume) as volume
+        FROM national_oem_vehcat
+        WHERE oem_name = ? AND month > 0
+        GROUP BY year, month
+        ORDER BY year, month
+    """, [oem_name])
+
+
+def get_oem_category_breakdown_scraped(oem_name, year, month):
+    """Get OEM's volume breakdown by base category for a specific month.
+
+    Returns DataFrame: base_category, volume
+    Aggregates vehcat category_group -> base categories (PV, 2W, 3W, CV, TRACTORS).
+    """
+    df = _query_df("""
+        SELECT category_group, SUM(volume) as volume
+        FROM national_oem_vehcat
+        WHERE oem_name = ? AND year = ? AND month = ?
+        GROUP BY category_group
+    """, [oem_name, year, month])
+
+    if df.empty:
+        return df
+
+    # Map to base categories
+    df["base_category"] = df["category_group"].map(VEHCAT_TO_BASE).fillna("OTHERS")
+    result = df.groupby("base_category")["volume"].sum().reset_index()
+    return result.sort_values("volume", ascending=False)
+
+
+def get_oem_category_monthly_scraped(oem_name):
+    """Get OEM's monthly volume by base category (full time series).
+
+    Returns DataFrame: year, month, base_category, volume
+    """
+    df = _query_df("""
+        SELECT year, month, category_group, SUM(volume) as volume
+        FROM national_oem_vehcat
+        WHERE oem_name = ? AND month > 0
+        GROUP BY year, month, category_group
+    """, [oem_name])
+
+    if df.empty:
+        return df
+
+    df["base_category"] = df["category_group"].map(VEHCAT_TO_BASE).fillna("OTHERS")
+    result = df.groupby(["year", "month", "base_category"])["volume"].sum().reset_index()
+    return result.sort_values(["year", "month"])
+
+
+def get_market_category_monthly_scraped():
+    """Get total market volume by base category monthly (all OEMs combined).
+
+    Returns DataFrame: year, month, base_category, volume
+    """
+    df = _query_df("""
+        SELECT year, month, category_group, SUM(volume) as volume
+        FROM national_oem_vehcat
+        WHERE month > 0
+        GROUP BY year, month, category_group
+    """)
+
+    if df.empty:
+        return df
+
+    df["base_category"] = df["category_group"].map(VEHCAT_TO_BASE).fillna("OTHERS")
+    result = df.groupby(["year", "month", "base_category"])["volume"].sum().reset_index()
+    return result.sort_values(["year", "month"])
+
+
+# ── National OEM data queries (from new scraper tables) ──────────────
+
+def get_oem_vehcat_monthly(oem_name, start_year=None, start_month=None):
+    """Get OEM's vehicle category breakdown by month.
+
+    Returns DataFrame: year, month, category_group, volume
+    Aggregated from raw veh_category codes to consolidated groups.
+    """
+    query = """
+        SELECT year, month, category_group, SUM(volume) as volume
+        FROM national_oem_vehcat
+        WHERE oem_name = ?
+    """
+    params = [oem_name]
+    if start_year and start_month:
+        query += " AND (year > ? OR (year = ? AND month >= ?))"
+        params.extend([start_year, start_year, start_month])
+    query += " GROUP BY year, month, category_group ORDER BY year, month"
+    return _query_df(query, params)
+
+
+def get_oem_fuel_monthly(oem_name, start_year=None, start_month=None):
+    """Get OEM's fuel type breakdown by month.
+
+    Returns DataFrame: year, month, fuel_group, volume
+    """
+    query = """
+        SELECT year, month, fuel_group, SUM(volume) as volume
+        FROM national_oem_fuel
+        WHERE oem_name = ?
+    """
+    params = [oem_name]
+    if start_year and start_month:
+        query += " AND (year > ? OR (year = ? AND month >= ?))"
+        params.extend([start_year, start_year, start_month])
+    query += " GROUP BY year, month, fuel_group ORDER BY year, month"
+    return _query_df(query, params)
+
+
+def get_oem_vehclass_monthly(oem_name, start_year=None, start_month=None):
+    """Get OEM's vehicle class breakdown by month (for Tractor/CE detail).
+
+    Returns DataFrame: year, month, class_group, volume
+    """
+    query = """
+        SELECT year, month, class_group, SUM(volume) as volume
+        FROM national_oem_vehclass
+        WHERE oem_name = ?
+    """
+    params = [oem_name]
+    if start_year and start_month:
+        query += " AND (year > ? OR (year = ? AND month >= ?))"
+        params.extend([start_year, start_year, start_month])
+    query += " GROUP BY year, month, class_group ORDER BY year, month"
+    return _query_df(query, params)
+
+
+def get_oem_sub_entities(parent_oem):
+    """Get sub-entities for a parent OEM from hierarchy table.
+
+    Returns list of dicts: [{oem_raw, sub_brand, business_category, fuel_profile}]
+    """
+    conn = get_connection()
+    rows = conn.execute("""
+        SELECT oem_raw, sub_brand, business_category, fuel_profile, notes
+        FROM oem_hierarchy
+        WHERE parent_oem = ? AND sub_brand IS NOT NULL
+        ORDER BY sub_brand
+    """, (parent_oem,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_oem_sub_brand_volumes(parent_oem, sub_brand, table='national_oem_vehcat',
+                               group_col='category_group'):
+    """Get volumes for a specific sub-brand within a parent OEM.
+
+    E.g., get Swaraj volumes within Mahindra Tractors.
+    Uses oem_raw matching through hierarchy table.
+    """
+    conn = get_connection()
+    raw_names = conn.execute("""
+        SELECT oem_raw FROM oem_hierarchy
+        WHERE parent_oem = ? AND sub_brand = ?
+    """, (parent_oem, sub_brand)).fetchall()
+    raw_names = [r['oem_raw'] for r in raw_names]
+
+    if not raw_names:
+        conn.close()
+        return pd.DataFrame()
+
+    placeholders = ','.join('?' * len(raw_names))
+    df = pd.read_sql_query(f"""
+        SELECT year, month, {group_col}, SUM(volume) as volume
+        FROM {table}
+        WHERE oem_raw IN ({placeholders})
+        GROUP BY year, month, {group_col}
+        ORDER BY year, month
+    """, conn, params=raw_names)
+    conn.close()
+    return df
+
+
+def get_last_scrape_info():
+    """Get latest scrape metadata for display in sidebar.
+
+    Returns list of dicts: [{scrape_type, last_completed, latest_year, latest_month}]
+    """
+    conn = get_connection()
+    rows = conn.execute("""
+        SELECT scrape_type,
+               MAX(completed_at) as last_completed,
+               MAX(year * 100 + COALESCE(month, 0)) as ym_key
+        FROM scrape_metadata
+        WHERE status = 'completed'
+        GROUP BY scrape_type
+        ORDER BY scrape_type
+    """).fetchall()
+    conn.close()
+
+    result = []
+    for r in rows:
+        ym = r['ym_key'] or 0
+        result.append({
+            'scrape_type': r['scrape_type'],
+            'last_completed': r['last_completed'],
+            'latest_year': ym // 100 if ym else None,
+            'latest_month': ym % 100 if ym else None,
+        })
+    return result
+
+
+def get_national_category_totals_from_vehcat(year=None, month=None):
+    """Compute national category totals from the vehcat table.
+
+    Can replace Excel-based national_monthly for category totals.
+    Returns DataFrame: year, month, category_group, volume
+    """
+    query = """
+        SELECT year, month, category_group, SUM(volume) as volume
+        FROM national_oem_vehcat
+    """
+    params = []
+    conditions = []
+    if year:
+        conditions.append("year = ?")
+        params.append(year)
+    if month:
+        conditions.append("month = ?")
+        params.append(month)
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+    query += " GROUP BY year, month, category_group ORDER BY year, month"
+    return _query_df(query, params)
+
+
+def has_national_oem_data(oem_name=None):
+    """Check if we have any data in the national OEM tables."""
+    conn = get_connection()
+    if oem_name:
+        row = conn.execute(
+            "SELECT COUNT(*) as cnt FROM national_oem_vehcat WHERE oem_name = ?",
+            (oem_name,)
+        ).fetchone()
+    else:
+        row = conn.execute("SELECT COUNT(*) as cnt FROM national_oem_vehcat").fetchone()
+    conn.close()
+    return row['cnt'] > 0

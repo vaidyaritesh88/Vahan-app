@@ -72,7 +72,10 @@ OEM_NORMALIZATION = {
     "VOLVO AUTO INDIA PVT LTD": "Volvo",
     "Volvo": "Volvo",
     "JSW MG MOTOR INDIA PVT LTD": "MG Motor",
+    "MG MOTOR INDIA Electric PVT LTD": "MG Motor",
+    "MG MOTOR INDIA ELECTRIC PVT LTD": "MG Motor",
     "HYUNDAI MOTORS LTD, SOUTH KOREA": "Hyundai",
+    "TATA PASSENGER VEHICLES LTD": "Tata Motors",  # distinct from TATA MOTORS PASSENGER VEHICLES LTD
 
     # === 2W OEMs ===
     "HERO MOTOCORP LTD": "Hero MotoCorp",
@@ -166,6 +169,12 @@ OEM_NORMALIZATION = {
     "ESCORTS LIMITED (AGRI MACHINERY GROUP)": "Escorts",
     "ESCORTS KUBOTA LIMITED (AGRI MACHINERY GROUP)": "Escorts",
     "ESCORTS CONSTRUCTION EQUIPMENT LTD": "Escorts",
+    "ESCORTS R&D CENTRE": "Escorts",
+    "ESCORTS KUBOTA LIMITED (CONSTRUCTION EQUIPMENT)": "Escorts",
+    "ADICO ESCORTS AGRI EQUIPMENTS PVT. LTD.": "Escorts",
+    "ESCORTS LTD": "Escorts",
+    "ESCORTS AUTOMOTIVE LTD": "Escorts",
+    "ESCORTS TRACTORS LTD": "Escorts",
     "Escorts": "Escorts",
     "JOHN DEERE INDIA PVT LTD": "John Deere",
     "JOHN DEERE INDIA  PVT LTD(TRACTOR DEVISION)": "John Deere",
@@ -177,6 +186,7 @@ OEM_NORMALIZATION = {
     "SONALIKA INTERNATIONAL TRACTORS LTD": "Sonalika",
     "SONALIKA INTERNATIONAL TRACTORS LIMITED": "Sonalika",
     "INTERNATIONAL TRACTORS LIMITED": "Sonalika",
+    "SONALIKA INDUSTRIES": "Sonalika",
     "Sonalika": "Sonalika",
     "TAFE MOTORS AND TRACTORS LTD": "TAFE",
     "TRACTORS AND FARM EQUIPMENT LTD": "TAFE",
@@ -221,7 +231,17 @@ OEM_NORMALIZATION = {
     "MEW ELECTRICALS LIMITED": "MEW Electric",
     "ATHER ENERGY LTD": "Ather Energy",
     "MAHINDRA ELECTRIC AUTOMOBILE LTD": "Mahindra",
-    "MAHINDRA DEFENCE SYSTEMS LTD": "Mahindra",
+    "MAHINDRA DEFENCE SYSTEMS LTD": "Mahindra Tractors",  # defence division - tractors
+
+
+    # === Cross-brand / partnership mappings ===
+    "MAHINDRA ELECTRIC MOBILITY LIMITED": "Mahindra",
+    "MAHINDRA TWO WHEELERS LTD": "Mahindra",
+    "MAHINDRA VEHICLE MANUFACTURER LIMITED": "Mahindra",
+    "TRIUMPH MOTORCYCLES (INDIA) PVT LTD": "Bajaj Auto",
+    "TRIUMPH UK": "Bajaj Auto",
+    "YADEA TECHNOLOGY (IMPORTER: YULU BIKES)": "Bajaj Auto",
+    "HARLEY DAVIDSON (IMPORTER: HERO MOTOCORP)": "Hero MotoCorp",
 }
 
 # Category-specific overrides: when the same raw name means different OEMs
@@ -247,6 +267,8 @@ CATEGORY_SPECIFIC_OVERRIDES = {
     ("M&M", "CV"): "Mahindra",
     ("M&M", "3W"): "Mahindra",
     ("M&M", "EV_3W"): "Mahindra",
+    # Escorts R&D Centre is tractor-related
+    ("ESCORTS R&D CENTRE", "TRACTORS"): "Escorts",
 }
 
 
