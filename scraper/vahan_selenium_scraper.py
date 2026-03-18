@@ -165,6 +165,7 @@ class VahanSeleniumScraper:
                 EC.presence_of_element_located((By.CSS_SELECTOR, "select"))
             )
             self._page_loaded = True
+            self._detect_button_ids()
             return True, "Portal accessible"
         except Exception as e:
             return False, f"Portal not accessible: {e}"
@@ -211,9 +212,9 @@ class VahanSeleniumScraper:
         self._pf_dropdown("selectedYearType", "Calendar Year")
         self._pf_dropdown("selectedYear", str(year))
 
-        # Do an initial Refresh (j_idt70) to establish server state
-        logger.info("Initial Refresh (j_idt70) to establish server state...")
-        self.driver.execute_script("document.getElementById('j_idt70').click();")
+        # Do an initial Refresh to establish server state
+        logger.info(f"Initial Refresh ({self._btn_main_refresh})...")
+        self.driver.execute_script(f"document.getElementById('{self._btn_main_refresh}').click();")
         time.sleep(8)
         self._wait_for_unblock()
 
@@ -233,10 +234,9 @@ class VahanSeleniumScraper:
             self._check_boxes("fuel", config["fuel"])
         time.sleep(0.5)
 
-        # Click j_idt75 (filter panel Refresh) — this is the ONLY button
-        # that processes checkbox filters!
-        logger.info("Filter Refresh (j_idt75) with checkboxes...")
-        self.driver.execute_script("document.getElementById('j_idt75').click();")
+        # Click the filter panel Refresh (processes checkbox filters)
+        logger.info(f"Filter Refresh ({self._btn_filter_refresh})...")
+        self.driver.execute_script(f"document.getElementById('{self._btn_filter_refresh}').click();")
         time.sleep(8)
         self._wait_for_unblock()
 
@@ -254,7 +254,43 @@ class VahanSeleniumScraper:
             )
         )
         self._page_loaded = True
+        self._detect_button_ids()
         logger.info("Portal loaded")
+
+
+    def _detect_button_ids(self):
+        """Dynamically detect Refresh button IDs (they change on portal redeploy)."""
+        ids = self.driver.execute_script("""
+            var btns = document.querySelectorAll('button');
+            var mainRefresh = null, filterRefresh = null, layoutWidget = null;
+            for (var i = 0; i < btns.length; i++) {
+                var oc = btns[i].getAttribute('onclick') || '';
+                if (oc.indexOf('PrimeFaces.ab') === -1) continue;
+                if (oc.indexOf('VhCatg') !== -1) {
+                    mainRefresh = btns[i].id;
+                } else if (oc.indexOf('combTablePnl') !== -1 && !filterRefresh) {
+                    filterRefresh = btns[i].id;
+                    var el = btns[i];
+                    for (var j = 0; j < 10 && el; j++) {
+                        if (el.id && el.id.indexOf('j_idt') !== -1
+                            && el.tagName === 'DIV' && el.id !== 'filterLayout') {
+                            layoutWidget = el.id;
+                        }
+                        el = el.parentElement;
+                    }
+                }
+            }
+            return {main: mainRefresh, filter: filterRefresh, layout: layoutWidget};
+        """)
+        self._btn_main_refresh = ids.get('main')
+        self._btn_filter_refresh = ids.get('filter')
+        self._layout_widget_id = ids.get('layout')
+        logger.info(
+            f"Detected IDs: main={self._btn_main_refresh}, "
+            f"filter={self._btn_filter_refresh}, layout={self._layout_widget_id}"
+        )
+        if not self._btn_filter_refresh:
+            raise RuntimeError("Could not detect filter Refresh button.")
 
     # -- Internal: PrimeFaces dropdown interaction ---------------------------
 
@@ -302,9 +338,8 @@ class VahanSeleniumScraper:
 
     def _open_filter_panel(self):
         """Open the left filter panel (Layout west pane) if closed."""
-        self.driver.execute_script(
-            "var l=PF('widget_j_idt74'); if(l) l.toggle('west');"
-        )
+        wn = f"widget_{self._layout_widget_id}" if self._layout_widget_id else "widget_j_idt70"
+        self.driver.execute_script(f"var l=PF('{wn}'); if(l) l.toggle('west');")
         time.sleep(2)
         logger.info("Opened filter panel")
 
@@ -413,6 +448,11 @@ class VahanSeleniumScraper:
 
         logger.info(f"Extracting '{month_label}' from column index {col_idx}")
 
+        # Reset to page 1 before extracting -- critical for multi-month extraction.
+        # Without this, after paginating through month N, the table stays on
+        # the last page, and month N+1 only gets the tail-end OEMs.
+        self._goto_first_page()
+
         all_records = []
         page_num = 1
 
@@ -435,6 +475,39 @@ class VahanSeleniumScraper:
 
         logger.info(f"Extracted {len(all_records)} total records for {month_label} ({page_num} pages)")
         return all_records
+
+    def _goto_first_page(self):
+        """Reset the PrimeFaces DataTable paginator to page 1.
+
+        Critical when extracting multiple months from the same table view:
+        after paginating through all pages for month N, the table stays on
+        the last page. Without resetting, month N+1 only sees that last page.
+        """
+        try:
+            result = self.driver.execute_script("""
+                var firstBtns = document.querySelectorAll(
+                    '#groupingTable_paginator_bottom .ui-paginator-first, ' +
+                    '.ui-paginator-first'
+                );
+                for (var i = 0; i < firstBtns.length; i++) {
+                    var btn = firstBtns[i];
+                    if (!btn.classList.contains('ui-state-disabled')) {
+                        btn.click();
+                        return 'CLICKED';
+                    }
+                }
+                return 'ALREADY_FIRST';
+            """)
+
+            if result == 'CLICKED':
+                time.sleep(3)
+                self._wait_for_unblock()
+                logger.info("Reset paginator to page 1")
+            return True
+
+        except Exception as e:
+            logger.debug(f"First page reset: {e}")
+            return False
 
     def _goto_next_page(self):
         """Click the next page button in the PrimeFaces DataTable paginator.
