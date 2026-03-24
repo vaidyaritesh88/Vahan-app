@@ -1524,3 +1524,68 @@ def has_oem_subsegment_data(oem_name=None):
     conn.close()
     return row['cnt'] > 0
 
+# ── Scraped-data query functions for redesigned pages ────────────────
+
+def get_all_categories_monthly_from_vehcat():
+    """Get national category totals from scraped vehcat data (replaces Excel-based queries).
+
+    Maps vehcat category_groups to standard categories:
+      PV, 2W, 3W -> direct
+      LCV + MHCV + BUS -> CV
+      (TRACTORS not available in vehcat data)
+
+    Returns DataFrame: year, month, category_code, volume
+    """
+    return _query_df("""
+        SELECT year, month,
+               CASE
+                   WHEN category_group IN ('LCV','MHCV','BUS') THEN 'CV'
+                   ELSE category_group
+               END as category_code,
+               SUM(volume) as volume
+        FROM national_oem_vehcat
+        WHERE category_group IN ('PV','2W','3W','LCV','MHCV','BUS')
+          AND month BETWEEN 1 AND 12
+        GROUP BY year, month, category_code
+        ORDER BY year, month
+    """)
+
+
+def get_category_oem_monthly_from_vehcat(category_code):
+    """Get per-OEM monthly volumes for a category from scraped vehcat data.
+
+    Handles CV mapping: if category_code='CV', queries LCV+MHCV+BUS.
+
+    Returns DataFrame: year, month, oem_name, volume
+    """
+    if category_code == 'CV':
+        return _query_df("""
+            SELECT year, month, oem_name, SUM(volume) as volume
+            FROM national_oem_vehcat
+            WHERE category_group IN ('LCV','MHCV','BUS')
+              AND month BETWEEN 1 AND 12
+            GROUP BY year, month, oem_name
+            ORDER BY year, month, oem_name
+        """)
+    return _query_df("""
+        SELECT year, month, oem_name, SUM(volume) as volume
+        FROM national_oem_vehcat
+        WHERE category_group = ?
+          AND month BETWEEN 1 AND 12
+        GROUP BY year, month, oem_name
+        ORDER BY year, month, oem_name
+    """, [category_code])
+
+
+def get_all_subsegment_totals_monthly():
+    """Get market totals per subsegment per month from national_oem_subsegment.
+
+    Returns DataFrame: year, month, subsegment_code, volume
+    """
+    return _query_df("""
+        SELECT year, month, subsegment_code, SUM(volume) as volume
+        FROM national_oem_subsegment
+        GROUP BY year, month, subsegment_code
+        ORDER BY year, month
+    """)
+
