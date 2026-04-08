@@ -20,7 +20,7 @@ init_db()
 st.set_page_config(page_title="Data Management", page_icon="⚙️", layout="wide")
 st.title("Data Management")
 
-tab1, tab2, tab3 = st.tabs(["Excel Import", "State Data Scraper", "Data Status"])
+tab1, tab2, tab3, tab4 = st.tabs(["Excel Import", "State Data Scraper", "Data Status", "Local Setup Guide"])
 
 # ── Tab 1: Excel Import ──
 with tab1:
@@ -429,3 +429,100 @@ with tab3:
                 agg_rows = aggregate_state_to_national()
                 st.success(f"Aggregated {agg_rows:,} rows into national_monthly.")
                 st.rerun()
+
+# ── Tab 4: Local Setup Guide ──
+with tab4:
+    st.subheader("Running Locally")
+    st.markdown("""
+    The Vahan portal blocks cloud server IPs, so **all scraping must be done locally**.
+    Follow these steps to run the dashboard and scrapers on your machine.
+    """)
+
+    st.markdown("### 1. Start the Dashboard")
+    st.code("""cd "C:\\Users\\ritesh.vaidya\\OneDrive\\Documents\\Janchor\\Auto\\Tracking\\Janchor Tracking File\\Vahan\\App"
+streamlit run Home.py""", language="bash")
+    st.caption("Opens at http://localhost:8501")
+
+    st.divider()
+
+    st.markdown("### 2. State-Level Scraper (HTTP)")
+    st.markdown("""
+    The **State Data Scraper** tab (above) launches the HTTP scraper from the UI itself.
+    No extra setup needed — just configure categories/states/years and click **Start Scraping**.
+
+    This scraper:
+    - Uses HTTP requests (no Chrome/Selenium needed)
+    - Runs in background — survives browser close
+    - Populates `state_monthly` table (state-level OEM data)
+    """)
+
+    st.divider()
+
+    st.markdown("### 3. Subsegment Scraper (Selenium)")
+    st.markdown("""
+    The **subsegment scraper** extracts national EV/CNG/Hybrid data using Selenium
+    (requires Chrome installed). It handles the Vahan portal's checkbox filters
+    that the HTTP scraper cannot.
+    """)
+
+    st.markdown("**Prerequisites:**")
+    st.code("pip install selenium webdriver-manager", language="bash")
+
+    st.markdown("**Run all subsegments for a fiscal year:**")
+    st.code("""python scraper/run_subsegments.py --types EV_PV EV_2W EV_3W PV_CNG PV_HYBRID --fy 2025""", language="bash")
+    st.caption("--fy 2025 = FY26 (Apr 2025 – Mar 2026). The parameter is the FY start year.")
+
+    st.markdown("**Run a specific subsegment and month:**")
+    st.code("python scraper/run_subsegments.py --types EV_2W --fy 2025 --month 3", language="bash")
+
+    st.markdown("**With visible browser (for debugging):**")
+    st.code("python scraper/run_subsegments.py --types EV_PV --fy 2025 --visible", language="bash")
+
+    st.markdown("**Available subsegment types:**")
+    sub_info = {
+        "EV_PV": "Electric Passenger Vehicles (Tata Nexon EV, MG ZS EV, etc.)",
+        "EV_2W": "Electric Two Wheelers (Ola, Ather, TVS iQube, etc.)",
+        "EV_3W": "Electric Three Wheelers (e-rickshaws, etc.)",
+        "PV_CNG": "CNG Passenger Vehicles (Maruti CNG, Hyundai CNG, etc.)",
+        "PV_HYBRID": "Strong Hybrid PV (Toyota Hyryder, Maruti Grand Vitara, etc.)",
+    }
+    for code, desc in sub_info.items():
+        st.markdown(f"- `{code}` — {desc}")
+
+    st.divider()
+
+    st.markdown("### 4. National OEM Scraper (HTTP)")
+    st.markdown("""
+    The national OEM scraper populates `national_oem_vehcat`, `national_oem_fuel`,
+    and `national_oem_vehclass` tables. It uses the same HTTP scraper as the state
+    scraper but with Y-axis set to Vehicle Category / Fuel / Maker.
+    """)
+    st.code("""python -c "
+from scraper.vahan_http_scraper import VahanHttpScraper
+scraper = VahanHttpScraper()
+# Scrape national data for a specific year
+scraper.scrape_national_oem(year=2026, modes=('category', 'fuel', 'maker'))
+" """, language="bash")
+
+    st.divider()
+
+    st.markdown("### Quick Reference")
+    ref_data = {
+        "Task": [
+            "Start dashboard",
+            "Scrape state data",
+            "Scrape EV/CNG/Hybrid subsegments",
+            "Scrape all subsegments FY26",
+            "Backfill FY20–FY25",
+        ],
+        "Command": [
+            "streamlit run Home.py",
+            "Use State Data Scraper tab in UI",
+            "python scraper/run_subsegments.py --types EV_2W --fy 2025",
+            "python scraper/run_subsegments.py --types EV_PV EV_2W EV_3W PV_CNG PV_HYBRID --fy 2025",
+            "Run above with --fy 2019 through --fy 2024",
+        ],
+        "Needs Chrome?": ["No", "No", "Yes", "Yes", "Yes"],
+    }
+    st.dataframe(pd.DataFrame(ref_data), use_container_width=True, hide_index=True)
+
