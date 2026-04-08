@@ -440,7 +440,7 @@ with tab4:
 
     st.markdown("### 1. Start the Dashboard")
     st.code("""cd "C:\\Users\\ritesh.vaidya\\OneDrive\\Documents\\Janchor\\Auto\\Tracking\\Janchor Tracking File\\Vahan\\App"
-streamlit run Home.py""", language="bash")
+streamlit run app.py""", language="bash")
     st.caption("Opens at http://localhost:8501")
 
     st.divider()
@@ -516,7 +516,7 @@ scraper.scrape_national_oem(year=2026, modes=('category', 'fuel', 'maker'))
             "Backfill FY20–FY25",
         ],
         "Command": [
-            "streamlit run Home.py",
+            "streamlit run app.py",
             "Use State Data Scraper tab in UI",
             "python scraper/run_subsegments.py --types EV_2W --fy 2025",
             "python scraper/run_subsegments.py --types EV_PV EV_2W EV_3W PV_CNG PV_HYBRID --fy 2025",
