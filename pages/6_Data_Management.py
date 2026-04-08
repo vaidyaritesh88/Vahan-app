@@ -130,17 +130,37 @@ with tab2:
         if started_at:
             st.caption(f"Started: {started_at[:19]}")
 
-        # Stop button
-        if status_label != "stopping":
+        # Stop buttons -- always visible (no more hiding after "stopping")
+        btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 2])
+        with btn_col1:
             if st.button("Stop Scraping", type="secondary", key="btn_stop"):
                 request_stop()
-                st.warning("Stop signal sent. Scraper will finish the current job and exit.")
-                import time; time.sleep(2)
                 st.rerun()
+        with btn_col2:
+            if st.button("Force Kill", type="secondary", key="btn_force_kill",
+                          help="Forcefully terminate the scraper process and clean up"):
+                import signal
+                pid = ctrl_info.get("pid")
+                if pid:
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                    except (ProcessLookupError, OSError):
+                        pass
+                # Clean up control file
+                try:
+                    os.remove(CONTROL_FILE)
+                except FileNotFoundError:
+                    pass
+                st.success("Scraper process killed and control file cleaned up.")
+                import time; time.sleep(1)
+                st.rerun()
+        with btn_col3:
+            st.caption("Use **Force Kill** if Stop doesn't work within 30 seconds.")
 
-        # Auto-refresh every 10 seconds while running
-        import time
-        time.sleep(10)
+        # Non-blocking auto-refresh: just show a refresh button instead of sleeping
+        st.caption("Page auto-refreshes every 15 seconds while scraper is running.")
+        import time as _time
+        _time.sleep(15)
         st.rerun()
 
     else:

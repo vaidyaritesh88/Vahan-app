@@ -86,6 +86,10 @@ def is_scraper_running():
     """Check if a background scraper is currently running.
 
     Returns (running: bool, info: dict or None).
+
+    Uses multiple heuristics:
+    1. PID alive check (os.kill(pid, 0) on Unix, psutil or tasklist on Windows)
+    2. Stale control file detection (no update in 120 seconds = dead)
     """
     ctrl = _read_control()
     if ctrl is None:
@@ -94,17 +98,56 @@ def is_scraper_running():
     if ctrl.get("status") not in ("running", "stopping"):
         return False, ctrl
 
-    # Check if the PID is still alive
+    # Heuristic 1: Stale control file = process died without cleanup
+    updated_at = ctrl.get("updated_at", "")
+    if updated_at:
+        try:
+            last_update = datetime.fromisoformat(updated_at)
+            age_seconds = (datetime.now() - last_update).total_seconds()
+            if age_seconds > 120:  # No update in 2 minutes = dead
+                _cleanup_control()
+                return False, None
+        except (ValueError, TypeError):
+            pass
+
+    # Heuristic 2: Check if the PID is still alive
     pid = ctrl.get("pid")
     if pid:
-        try:
-            os.kill(pid, 0)
+        if _is_pid_alive(pid):
             return True, ctrl
-        except (OSError, ProcessLookupError):
+        else:
             _cleanup_control()
             return False, None
 
     return False, ctrl
+
+
+def _is_pid_alive(pid):
+    """Check if a process with given PID is still running (cross-platform)."""
+    import platform
+    if platform.system() == "Windows":
+        # On Windows, os.kill(pid, 0) doesn't reliably detect dead processes.
+        # Use tasklist instead.
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                capture_output=True, text=True, timeout=5,
+            )
+            return str(pid) in result.stdout
+        except Exception:
+            # Fallback to os.kill
+            try:
+                os.kill(pid, 0)
+                return True
+            except (OSError, ProcessLookupError):
+                return False
+    else:
+        try:
+            os.kill(pid, 0)
+            return True
+        except (OSError, ProcessLookupError):
+            return False
 
 
 def request_stop():
