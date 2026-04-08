@@ -20,6 +20,7 @@ import os
 import sys
 import time
 import subprocess
+import pathlib
 from datetime import datetime
 
 # Ensure project root is importable
@@ -34,7 +35,18 @@ CONTROL_FILE = os.path.join(DATA_DIR, ".scraper_control.json")
 
 
 def _write_control(status, pid=None, extra=None):
-    """Write scraper control file."""
+    """Write scraper control file.
+
+    IMPORTANT: If status is "running" but the file already says "stopping",
+    we preserve "stopping" to avoid a race condition where the progress
+    update clobbers the stop signal.
+    """
+    # Preserve stop signal — don't overwrite "stopping" with "running"
+    if status == "running":
+        existing = _read_control()
+        if existing and existing.get("status") == "stopping":
+            status = "stopping"
+
     data = {
         "status": status,
         "pid": pid or os.getpid(),
@@ -157,6 +169,9 @@ def run_state_scrape(states, years, modes=("category", "fuel", "maker"),
     try:
         scraper = VahanHttpScraper()
 
+        consecutive_failures = 0
+        MAX_CONSECUTIVE_FAILURES = 10
+
         for i, (state, year) in enumerate(jobs):
             if _should_stop():
                 print(f"\nStop requested. Completed {success + failed}/{total}.")
@@ -170,10 +185,17 @@ def run_state_scrape(states, years, modes=("category", "fuel", "maker"),
                     state, year, modes=modes)
                 total_rows += rows
                 success += 1
+                consecutive_failures = 0  # Reset on success
                 print(f"OK ({rows} rows)")
             except Exception as e:
                 failed += 1
+                consecutive_failures += 1
                 print(f"FAILED: {str(e)[:80]}")
+
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                    print(f"\n{MAX_CONSECUTIVE_FAILURES} consecutive failures "
+                          f"-- stopping (portal may be unreachable).")
+                    break
 
             _write_control("running", extra={
                 "total_jobs": total,
@@ -239,7 +261,6 @@ def _git_push_db():
             print(f"  git add failed: {r1.stderr.strip()}")
             return
 
-        from datetime import datetime
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
         msg = f"data: update vahan_tracker.db ({ts})"
         r2 = _run(["git", "commit", "-m", msg])
