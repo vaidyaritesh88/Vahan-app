@@ -205,14 +205,14 @@ def _build_segment_pivot(filtered_seg, freq, category, ordered_labels):
 # ====================
 # SIDEBAR
 # ====================
-selected_cat = st.sidebar.selectbox("Category", CATEGORIES, key="ps_cat")
-preset, ref_year, ref_month = primary_period_selector(key="ps_period")
+selected_cat = st.sidebar.selectbox("Category", CATEGORIES, key="pri_cat")
+preset, ref_year, ref_month = primary_period_selector(key="pri_period")
 if ref_year is None:
     st.warning("No data loaded. Upload data or run scraper in Data Management.")
     st.stop()
 
 FREQ_MAP = {"Monthly": "monthly", "Quarterly": "quarterly", "Financial Year": "annual"}
-freq_label = st.sidebar.selectbox("Frequency", list(FREQ_MAP.keys()), key="ps_freq")
+freq_label = st.sidebar.selectbox("Frequency", list(FREQ_MAP.keys()), key="pri_freq")
 freq = FREQ_MAP[freq_label]
 
 top_n = top_n_selector(key="ps_topn")

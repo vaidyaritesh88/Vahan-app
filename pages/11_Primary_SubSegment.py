@@ -158,7 +158,7 @@ def _build_share_table(pivot_vol, ordered_labels):
 # ====================
 # SIDEBAR
 # ====================
-selected_cat = st.sidebar.selectbox("Category", CATEGORIES, key="pss_cat")
+selected_cat = st.sidebar.selectbox("Category", CATEGORIES, key="pri_cat")
 
 # Populate sub-segment list ordered by config
 available_segments = get_primary_segments_list(selected_cat)
@@ -174,13 +174,13 @@ ordered_segments.extend(remaining)
 
 selected_segment = st.sidebar.selectbox("Sub-Segment", ordered_segments, key="pss_segment")
 
-preset, ref_year, ref_month = primary_period_selector(key="pss_period")
+preset, ref_year, ref_month = primary_period_selector(key="pri_period")
 if ref_year is None:
     st.warning("No data loaded. Upload data or run scraper in Data Management.")
     st.stop()
 
 FREQ_MAP = {"Monthly": "monthly", "Quarterly": "quarterly", "Financial Year": "annual"}
-freq_label = st.sidebar.selectbox("Frequency", list(FREQ_MAP.keys()), key="pss_freq")
+freq_label = st.sidebar.selectbox("Frequency", list(FREQ_MAP.keys()), key="pri_freq")
 freq = FREQ_MAP[freq_label]
 
 top_n = top_n_selector(key="pss_topn")
@@ -422,13 +422,10 @@ oem_vol_display.index.name = "OEM"
 st.dataframe(oem_vol_display, width="stretch")
 
 
-# ======================================================================
-# SECTION 7: OEM YoY Growth Table (expander)
-# ======================================================================
-with st.expander("OEM YoY Growth %"):
-    yoy_oem = _build_yoy_table(pivot_oem, ordered_labels_oem, incomplete_periods, freq)
-    yoy_oem.index.name = "OEM"
-    st.dataframe(yoy_oem, width="stretch")
+st.markdown("**OEM YoY Growth %**")
+yoy_oem = _build_yoy_table(pivot_oem, ordered_labels_oem, incomplete_periods, freq)
+yoy_oem.index.name = "OEM"
+st.dataframe(yoy_oem, width="stretch")
 
 
 # ======================================================================

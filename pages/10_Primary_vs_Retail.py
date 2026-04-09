@@ -18,7 +18,7 @@ from database.queries import (
     get_all_categories_monthly_from_vehcat, get_category_oem_monthly_from_vehcat,
     has_primary_data, get_last_scrape_info,
 )
-from components.filters import period_selector
+from components.filters import primary_period_selector
 from components.formatters import format_units, format_month, format_pct, OEM_COLORS
 from components.charts import dual_axis_bar_line
 from components.analysis import (
@@ -128,15 +128,15 @@ def _aggregate_comparison(primary_df, retail_df, freq):
 # ══════════════════════════════════════════════
 CATEGORIES = ["PV", "2W"]
 
-selected_cat = st.sidebar.selectbox("Category", CATEGORIES, key="pvr_cat")
+selected_cat = st.sidebar.selectbox("Category", CATEGORIES, key="pri_cat")
 
-preset, ref_year, ref_month = period_selector(key="pvr_period")
+preset, ref_year, ref_month = primary_period_selector(key="pri_period")
 if ref_year is None:
     st.warning("No data loaded. Upload data or run scraper in Data Management.")
     st.stop()
 
 FREQ_MAP = {"Monthly": "monthly", "Quarterly": "quarterly", "Financial Year": "annual"}
-freq_label = st.sidebar.selectbox("Frequency", list(FREQ_MAP.keys()), key="pvr_freq")
+freq_label = st.sidebar.selectbox("Frequency", list(FREQ_MAP.keys()), key="pri_freq")
 freq = FREQ_MAP[freq_label]
 
 # OEM selector
