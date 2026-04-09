@@ -20,7 +20,7 @@ st.markdown("""
 | **Granularity** | Monthly, by State, by OEM (Maker), by Vehicle Category, by Fuel Type |
 | **Coverage** | All states and UTs **except Telangana and Odisha** (these states do not report to Vahan consistently) |
 | **History** | Available from April 2017 onwards in our database |
-| **Update frequency** | Monthly, typically with a 2-3 week lag after month-end |
+| **Update frequency** | Can be next day, but for best results scrape with at least a 7-day lag after month-end |
 | **Scraping method** | HTTP scraper (state-level data) + Selenium scraper (national subsegment data with checkbox filters) |
 
 **Important caveat:** Since Telangana and Odisha data is missing, absolute retail volumes are ~5-8% lower than actual national totals. This is why we use YoY growth rates (not absolute volumes) when comparing with primary sales.
