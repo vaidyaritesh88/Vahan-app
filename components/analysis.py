@@ -244,7 +244,7 @@ def get_period_months(preset_name, latest_year, latest_month):
         fy_start_year = latest_year if latest_month >= 4 else latest_year - 1
         start_date = pd.Timestamp(fy_start_year, 4, 1)
     elif n_months is None:
-        start_date = pd.Timestamp(2019, 1, 1)
+        start_date = pd.Timestamp(2000, 1, 1)  # Far enough back to cover all data
     else:
         start_date = end_date - pd.DateOffset(months=n_months - 1)
     return start_date, end_date
