@@ -167,11 +167,10 @@ if avail_months:
     _default_fy_start = _today.year - 2 if _today.month >= 4 else _today.year - 3
     _default_base = format_month(_default_fy_start, 4)
     _def_idx = base_options.index(_default_base) if _default_base in base_options else 0
-    base_month_lbl = st.sidebar.selectbox(
-        "Base Month (Index=100)", base_options,
-        index=_def_idx if "pvr_base" not in st.session_state else None,
-        key="pvr_base",
-    )
+    base_kwargs = {"key": "pvr_base", "help": "The starting point for the rebased index. Both Primary and Retail volumes are set to 100 in this month. Choose an older month to see longer-term divergence between the two series."}
+    if "pvr_base" not in st.session_state:
+        base_kwargs["index"] = _def_idx
+    base_month_lbl = st.sidebar.selectbox("Base Month (Index=100)", base_options, **base_kwargs)
 else:
     base_month_lbl = None
 
