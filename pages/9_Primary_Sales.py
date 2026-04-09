@@ -62,11 +62,18 @@ def _period_lbl(row, freq):
 
 
 def _fy_label_with_ytd(fy_start, data):
-    """Return 'FY26' or 'YTDFY26' depending on completeness."""
+    """Return 'FY26' or 'YTDFY26' — only the latest FY gets YTD label.
+
+    Historical FYs with <12 months (e.g., FY21 missing Apr 2020 due to
+    COVID zero sales) should NOT be labeled YTD.
+    """
     label = get_fy_label(fy_start)
-    fy_months = data[data["fy"] == fy_start]
-    if len(fy_months["month"].unique()) < 12:
-        return f"YTD{label}"
+    max_fy = int(data["fy"].max())
+    # Only mark the latest FY as YTD if incomplete
+    if fy_start == max_fy:
+        fy_months = data[data["fy"] == fy_start]
+        if len(fy_months["month"].unique()) < 12:
+            return f"YTD{label}"
     return label
 
 
@@ -158,6 +165,17 @@ def _build_segment_pivot(filtered_seg, freq, category, ordered_labels):
 
     seg_tables = pd.concat(seg_agg_frames, ignore_index=True)
     seg_tables["label"] = seg_tables.apply(lambda r: _period_lbl(r, freq), axis=1)
+
+    # For annual frequency, align segment labels with category-level YTD labels
+    if freq == "annual" and ordered_labels:
+        label_map = {}
+        for lbl in seg_tables["label"].unique():
+            # If ordered_labels has a YTDFY version, use it
+            ytd_version = "YTD" + lbl
+            if ytd_version in ordered_labels:
+                label_map[lbl] = ytd_version
+        if label_map:
+            seg_tables["label"] = seg_tables["label"].replace(label_map)
 
     pivot = seg_tables.pivot_table(
         index="segment", columns="label", values="volume", aggfunc="sum"

@@ -56,11 +56,18 @@ def _period_lbl(row, freq):
 
 
 def _fy_label_with_ytd(fy_start, data):
-    """Return 'FY26' or 'YTDFY26' depending on completeness."""
+    """Return 'FY26' or 'YTDFY26' — only the latest FY gets YTD label.
+
+    Historical FYs with <12 months (e.g., FY21 missing Apr 2020 due to
+    COVID zero sales) should NOT be labeled YTD.
+    """
     label = get_fy_label(fy_start)
-    fy_months = data[data["fy"] == fy_start]
-    if len(fy_months["month"].unique()) < 12:
-        return f"YTD{label}"
+    max_fy = int(data["fy"].max())
+    # Only mark the latest FY as YTD if incomplete
+    if fy_start == max_fy:
+        fy_months = data[data["fy"] == fy_start]
+        if len(fy_months["month"].unique()) < 12:
+            return f"YTD{label}"
     return label
 
 
