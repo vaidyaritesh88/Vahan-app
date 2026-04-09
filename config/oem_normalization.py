@@ -163,7 +163,6 @@ OEM_NORMALIZATION = {
     "MAHINDRA & MAHINDRA LTD FARM MACHINERY DIVISION": "Mahindra Tractors",
     "MAHINDRA GUJARAT TRACTOR LIMITED": "Mahindra Tractors",
     "MAHINDRA & MAHINDRA LIMITED (SWARAJ DIVISION)": "Mahindra Tractors",
-    "Mahindra": "Mahindra Tractors",  # In tractor context
     "ESCORTS LIMITED": "Escorts",
     "ESCORTS KUBOTA LIMITED": "Escorts",
     "ESCORTS LIMITED (AGRI MACHINERY GROUP)": "Escorts",
@@ -231,7 +230,7 @@ OEM_NORMALIZATION = {
     "MEW ELECTRICALS LIMITED": "MEW Electric",
     "ATHER ENERGY LTD": "Ather Energy",
     "MAHINDRA ELECTRIC AUTOMOBILE LTD": "Mahindra",
-    "MAHINDRA DEFENCE SYSTEMS LTD": "Mahindra Tractors",  # defence division - tractors
+    "MAHINDRA DEFENCE SYSTEMS LTD": "Mahindra",  # defence division
 
 
     # === Cross-brand / partnership mappings ===
