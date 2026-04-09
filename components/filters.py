@@ -148,10 +148,16 @@ def period_selector(key="period_preset", label="Analysis Period", default_preset
 
     ref_kwargs = {"key": ref_key, "help": "The latest month to include in the analysis. Defaults to the last fully completed month (current partial month is excluded)."}
     if ref_key not in st.session_state:
+        # Skip current month AND previous month (data reporting lag means
+        # the most recent month is typically incomplete for 7-15 days)
+        _prev_month = _today.month - 1 if _today.month > 1 else 12
+        _prev_year = _today.year if _today.month > 1 else _today.year - 1
         default_ref_idx = 0
         for i, (y, m) in enumerate(months):
-            if y == _today.year and m == _today.month:
-                continue
+            if (y == _today.year and m == _today.month):
+                continue  # Skip current month
+            if (y == _prev_year and m == _prev_month):
+                continue  # Skip previous month (likely incomplete)
             default_ref_idx = i
             break
         ref_kwargs["index"] = default_ref_idx
@@ -204,9 +210,13 @@ def primary_period_selector(key="ps_period", label="Analysis Period", default_pr
     if ref_key not in st.session_state:
         from datetime import date as _date
         _today = _date.today()
+        _prev_month = _today.month - 1 if _today.month > 1 else 12
+        _prev_year = _today.year if _today.month > 1 else _today.year - 1
         default_idx = 0
         for i, (y, m) in enumerate(months):
-            if y == _today.year and m == _today.month:
+            if (y == _today.year and m == _today.month):
+                continue
+            if (y == _prev_year and m == _prev_month):
                 continue
             default_idx = i
             break
