@@ -81,26 +81,62 @@ def kpi_row(metrics, cols):
 
 def dual_axis_bar_line(df, x="date", bar_y="volume", line_y="yoy_pct",
                        title="", bar_name="Volume", line_name="YoY %",
-                       height=420):
-    """Dual-axis chart: bars for volume (left axis) + line for growth % (right axis)."""
+                       height=420, yoy_clip=(-80, 120)):
+    """Dual-axis chart: bars for volume (left axis) + line for growth % (right axis).
+
+    yoy_clip: (min%, max%) range for the YoY axis. COVID base effects (Apr-Jun 2021
+    showing +1000% YoY due to near-zero Apr-Jun 2020) blow up the chart scale.
+    Values outside the clip range are capped and shown with a triangle marker.
+    Default: -80% to +120% which covers most normal business cycles.
+    """
+    import numpy as np
+
     fig = go.Figure()
     fig.add_trace(go.Bar(
         x=df[x], y=df[bar_y], name=bar_name,
         marker_color="#1f77b4", opacity=0.75,
         yaxis="y",
     ))
+
+    # Clip YoY values for display, mark outliers
+    yoy_vals = df[line_y].copy()
+    clipped = yoy_vals.clip(lower=yoy_clip[0], upper=yoy_clip[1])
+    is_outlier = (yoy_vals < yoy_clip[0]) | (yoy_vals > yoy_clip[1])
+
+    # Main YoY line (clipped values)
     fig.add_trace(go.Scatter(
-        x=df[x], y=df[line_y], name=line_name,
+        x=df[x], y=clipped, name=line_name,
         mode="lines+markers", line=dict(color="#d62728", width=2.5),
         marker=dict(size=6),
         yaxis="y2",
+        customdata=yoy_vals,
+        hovertemplate="%{customdata:.1f}%<extra></extra>",
     ))
+
+    # Mark outlier points with triangles and actual value annotation
+    if is_outlier.any():
+        outlier_df = df[is_outlier]
+        outlier_clipped = clipped[is_outlier]
+        outlier_actual = yoy_vals[is_outlier]
+        fig.add_trace(go.Scatter(
+            x=outlier_df[x], y=outlier_clipped,
+            mode="markers+text",
+            marker=dict(symbol="triangle-up", size=12, color="#d62728"),
+            text=[f"{v:+.0f}%" for v in outlier_actual],
+            textposition="top center",
+            textfont=dict(size=9, color="#d62728"),
+            showlegend=False,
+            yaxis="y2",
+            hovertemplate="%{text}<extra>Outlier (clipped)</extra>",
+        ))
+
     fig.update_layout(
         **LAYOUT_DEFAULTS,
         height=height,
         title=title,
         yaxis=dict(title="Volume", side="left"),
         yaxis2=dict(title="YoY %", side="right", overlaying="y",
+                    range=[yoy_clip[0] - 10, yoy_clip[1] + 10],
                     zeroline=True, zerolinecolor="rgba(0,0,0,0.2)"),
         hovermode="x unified",
     )

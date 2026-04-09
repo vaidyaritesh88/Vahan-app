@@ -129,6 +129,17 @@ def _rebase_index(agg, base_label, vol_col="volume"):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+
+# YoY axis clipping to handle COVID outliers (Apr-Jun 2021 base effects)
+YOY_CLIP = (-80, 120)
+
+def _clip_yoy(series):
+    """Clip YoY% values and return (clipped_series, outlier_mask)."""
+    import numpy as np
+    clipped = series.clip(lower=YOY_CLIP[0], upper=YOY_CLIP[1])
+    outliers = (series < YOY_CLIP[0]) | (series > YOY_CLIP[1])
+    return clipped, outliers
+
 # SIDEBAR
 # ══════════════════════════════════════════════════════════════════════════════
 CATEGORIES = ["PV", "2W"]
@@ -288,7 +299,7 @@ fig1.add_trace(go.Scatter(
 fig1.add_hline(y=0, line_dash="dash", line_color="grey", line_width=1)
 fig1.update_layout(
     title=f"{entity_label} \u2014 YoY Growth: Primary vs Retail",
-    yaxis_title="YoY Growth %",
+    yaxis_title="YoY Growth %", yaxis_range=[YOY_CLIP[0] - 10, YOY_CLIP[1] + 10],
     xaxis_title="Period",
     height=460,
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
