@@ -1654,3 +1654,117 @@ def get_all_subsegment_totals_monthly():
         ORDER BY year, month
     """)
 
+# ── Primary Sales queries (OEM dispatches from Excel) ────────────────
+
+def has_primary_data(category=None):
+    """Check if primary sales data exists."""
+    conn = get_connection()
+    if category:
+        row = conn.execute(
+            "SELECT COUNT(*) as cnt FROM primary_sales WHERE category = ?", (category,)
+        ).fetchone()
+    else:
+        row = conn.execute("SELECT COUNT(*) as cnt FROM primary_sales").fetchone()
+    conn.close()
+    return row['cnt'] > 0
+
+
+def get_primary_category_monthly(category):
+    """Get monthly total volumes for a category (PV or 2W).
+
+    Returns DataFrame: year, month, volume
+    """
+    return _query_df("""
+        SELECT year, month, SUM(volume) as volume
+        FROM primary_sales
+        WHERE category = ? AND month BETWEEN 1 AND 12
+        GROUP BY year, month
+        ORDER BY year, month
+    """, [category])
+
+
+def get_primary_oem_monthly(category):
+    """Get per-OEM monthly volumes for a category.
+
+    Returns DataFrame: year, month, oem_name, volume
+    """
+    return _query_df("""
+        SELECT year, month, oem_name, SUM(volume) as volume
+        FROM primary_sales
+        WHERE category = ? AND month BETWEEN 1 AND 12
+        GROUP BY year, month, oem_name
+        ORDER BY year, month, oem_name
+    """, [category])
+
+
+def get_primary_segment_monthly(category):
+    """Get per-segment monthly volumes for a category.
+
+    Returns DataFrame: year, month, segment, volume
+    """
+    return _query_df("""
+        SELECT year, month, segment, SUM(volume) as volume
+        FROM primary_sales
+        WHERE category = ? AND month BETWEEN 1 AND 12
+        GROUP BY year, month, segment
+        ORDER BY year, month
+    """, [category])
+
+
+def get_primary_oem_segment_monthly(category, oem_name):
+    """Get an OEM's segment breakdown for a category.
+
+    Returns DataFrame: year, month, segment, volume
+    """
+    return _query_df("""
+        SELECT year, month, segment, SUM(volume) as volume
+        FROM primary_sales
+        WHERE category = ? AND oem_name = ? AND month BETWEEN 1 AND 12
+        GROUP BY year, month, segment
+        ORDER BY year, month
+    """, [category, oem_name])
+
+
+def get_primary_latest_month():
+    """Get the latest month with primary sales data.
+
+    Returns (year, month) or (None, None).
+    """
+    conn = get_connection()
+    row = conn.execute("""
+        SELECT year, month FROM primary_sales
+        WHERE month BETWEEN 1 AND 12
+        ORDER BY year DESC, month DESC LIMIT 1
+    """).fetchone()
+    conn.close()
+    if row:
+        return row['year'], row['month']
+    return None, None
+
+
+def get_primary_import_stats():
+    """Get summary stats about imported primary sales data."""
+    conn = get_connection()
+    stats = {}
+    row = conn.execute("""
+        SELECT COUNT(*) as cnt,
+               COUNT(DISTINCT category) as cats,
+               COUNT(DISTINCT oem_name) as oems,
+               MIN(year||\'-\'||printf(\' %02d\',month)) as first_month,
+               MAX(year||\'-\'||printf(\' %02d\',month)) as last_month,
+               MAX(updated_at) as last_import
+        FROM primary_sales
+        WHERE month BETWEEN 1 AND 12
+    """).fetchone()
+    conn.close()
+    if row and row['cnt'] > 0:
+        return {
+            "total_records": row['cnt'],
+            "categories": row['cats'],
+            "oem_count": row['oems'],
+            "first_month": row['first_month'],
+            "last_month": row['last_month'],
+            "last_import": row['last_import'],
+        }
+    return None
+

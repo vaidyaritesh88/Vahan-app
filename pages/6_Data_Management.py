@@ -340,8 +340,87 @@ with tab2:
     else:
         st.info("No scrape history yet. Configure and start the scraper above.")
 
-# ── Tab 3: Data Status ──
+
+# ── Tab 3: Primary Sales Import ──
 with tab3:
+    st.subheader("Primary Sales Data Import")
+    st.markdown("""
+    Import primary (wholesale/dispatch) sales data from the OEM database Excel file.
+    This data comes from company filings and tracks factory dispatches to dealers.
+
+    **Required sheets:** `Volume_4W` (PV) and `Volume_2W` (2W)
+    """)
+
+    from database.queries import get_primary_import_stats
+
+    # Show current import stats
+    ps_stats = get_primary_import_stats()
+    if ps_stats:
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total Records", f"{ps_stats['total_records']:,}")
+        with col2:
+            st.metric("OEMs", f"{ps_stats['oem_count']}")
+        with col3:
+            st.metric("Date Range", f"{ps_stats['first_month']} to {ps_stats['last_month']}")
+        with col4:
+            last_ts = ps_stats['last_import'][:16] if ps_stats['last_import'] else 'Never'
+            st.metric("Last Import", last_ts)
+        st.divider()
+
+    # File uploader
+    ps_file = st.file_uploader(
+        "Upload Primary Sales Excel",
+        type=["xlsx", "xls"],
+        key="ps_upload",
+        help="Upload the Simplified Auto Database Excel file with Volume_4W and Volume_2W sheets",
+    )
+
+    # Also check for existing files in the app directory
+    import glob
+    existing_ps = [f for f in glob.glob("*.xlsx") if "Simplified" in f or "Auto Database" in f]
+
+    if existing_ps:
+        st.markdown("**Or load from existing file in app directory:**")
+        selected_ps = st.selectbox("Existing file", ["-- Select --"] + existing_ps, key="ps_existing")
+
+        if selected_ps != "-- Select --" and st.button("Load Existing File", key="btn_ps_load"):
+            with st.spinner("Parsing primary sales data..."):
+                try:
+                    from data_pipeline.primary_sales_parser import load_primary_sales
+                    import shutil, tempfile
+                    # Copy to temp to avoid permission issues if file is open
+                    tmp = os.path.join(tempfile.gettempdir(), "ps_import.xlsx")
+                    shutil.copy2(selected_ps, tmp)
+                    stats = load_primary_sales(tmp)
+                    st.success(
+                        f"Imported {stats['total']:,} records "
+                        f"(PV: {stats['pv_records']:,}, 2W: {stats['tw_records']:,})"
+                    )
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error: {str(e)}")
+
+    if ps_file:
+        if st.button("Parse and Load", key="btn_ps_parse"):
+            with st.spinner("Parsing primary sales data..."):
+                try:
+                    from data_pipeline.primary_sales_parser import load_primary_sales
+                    import tempfile
+                    tmp_path = os.path.join(tempfile.gettempdir(), ps_file.name)
+                    with open(tmp_path, "wb") as f:
+                        f.write(ps_file.getbuffer())
+                    stats = load_primary_sales(tmp_path)
+                    st.success(
+                        f"Imported {stats['total']:,} records "
+                        f"(PV: {stats['pv_records']:,}, 2W: {stats['tw_records']:,})"
+                    )
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error: {str(e)}")
+
+# ── Tab 4: Data Status ──
+with tab4:
     st.subheader("Data Overview")
 
     counts = get_record_counts()
@@ -450,8 +529,8 @@ with tab3:
                 st.success(f"Aggregated {agg_rows:,} rows into national_monthly.")
                 st.rerun()
 
-# ── Tab 4: Local Setup Guide ──
-with tab4:
+# ── Tab 5: Local Setup Guide ──
+with tab5:
     st.subheader("Running Locally")
     st.markdown("""
     The Vahan portal blocks cloud server IPs, so **all scraping must be done locally**.

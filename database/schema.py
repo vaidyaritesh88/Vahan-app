@@ -185,7 +185,23 @@ def create_tables():
         UNIQUE(scrape_type, year, month, state)
     );
 
+    -- Primary sales (OEM dispatches / wholesale volumes from Excel)
+    CREATE TABLE IF NOT EXISTS primary_sales (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        category TEXT NOT NULL,
+        segment TEXT NOT NULL,
+        oem_name TEXT NOT NULL,
+        model_name TEXT NOT NULL,
+        year INTEGER NOT NULL,
+        month INTEGER NOT NULL,
+        volume REAL NOT NULL DEFAULT 0,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(category, oem_name, model_name, year, month)
+    );
+
     -- Indexes
+    CREATE INDEX IF NOT EXISTS idx_primary_cat_ym ON primary_sales(category, year, month);
+    CREATE INDEX IF NOT EXISTS idx_primary_oem ON primary_sales(oem_name, year, month);
     CREATE INDEX IF NOT EXISTS idx_national_cat_ym ON national_monthly(category_code, year, month);
     CREATE INDEX IF NOT EXISTS idx_national_oem ON national_monthly(oem_name);
     CREATE INDEX IF NOT EXISTS idx_state_cat_state ON state_monthly(category_code, state, year, month);
