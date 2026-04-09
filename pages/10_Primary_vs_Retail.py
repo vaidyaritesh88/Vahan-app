@@ -389,3 +389,11 @@ idx_tbl = {
 idx_tbl_df = pd.DataFrame(idx_tbl, index=idx_periods).T
 idx_tbl_df.index.name = "Metric"
 st.dataframe(idx_tbl_df, width="stretch")
+
+st.caption(
+    "**How to read this chart:** The gap between the Primary and Retail index lines "
+    "reflects the **change in dealer-level inventory** since the base month \u2014 not the "
+    "absolute level of inventory. A widening gap (Primary above Retail) means dealers are "
+    "accumulating more stock relative to the base period. A narrowing gap means destocking. "
+    "The index does not tell you how many units are sitting at dealerships in absolute terms."
+)
