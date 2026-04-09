@@ -167,6 +167,7 @@ def primary_period_selector(key="ps_period", label="Analysis Period"):
     """Period preset selector using primary_sales data range (not national_monthly).
 
     Returns (preset_name, year, month).
+    Session state is preserved across tab switches when all pages use the same key.
     """
     from database.queries import get_primary_available_months
     months = get_primary_available_months()
@@ -174,20 +175,31 @@ def primary_period_selector(key="ps_period", label="Analysis Period"):
         st.sidebar.warning("No primary sales data loaded yet.")
         return None, None, None
 
-    preset = st.sidebar.selectbox(label, list(PERIOD_PRESETS.keys()), key=f"{key}_preset")
+    # Only set default index on first render — don't override session state on tab switch
+    preset_key = f"{key}_preset"
+    ref_key = f"{key}_ref"
 
-    # Default to last completed month
-    from datetime import date as _date
-    _today = _date.today()
-    default_idx = 0
-    for i, (y, m) in enumerate(months):
-        if y == _today.year and m == _today.month:
-            continue
-        default_idx = i
-        break
+    # Don't pass index if key already in session state (preserves user's selection)
+    preset_kwargs = {"key": preset_key}
+    if preset_key not in st.session_state:
+        preset_kwargs["index"] = 0
+    preset = st.sidebar.selectbox(label, list(PERIOD_PRESETS.keys()), **preset_kwargs)
 
+    # Default to last completed month (only on first render)
     options = [f"{format_month(y, m)}" for y, m in months]
-    selected = st.sidebar.selectbox("Reference Month", options, index=default_idx, key=f"{key}_ref")
+
+    if ref_key not in st.session_state:
+        from datetime import date as _date
+        _today = _date.today()
+        default_idx = 0
+        for i, (y, m) in enumerate(months):
+            if y == _today.year and m == _today.month:
+                continue
+            default_idx = i
+            break
+        selected = st.sidebar.selectbox("Reference Month", options, index=default_idx, key=ref_key)
+    else:
+        selected = st.sidebar.selectbox("Reference Month", options, key=ref_key)
     idx = options.index(selected)
     year, month = months[idx]
 
