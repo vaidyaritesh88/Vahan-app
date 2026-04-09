@@ -20,7 +20,7 @@ init_db()
 st.set_page_config(page_title="Data Management", page_icon="⚙️", layout="wide")
 st.title("Data Management")
 
-tab1, tab2, tab3, tab4 = st.tabs(["Excel Import", "State Data Scraper", "Data Status", "Local Setup Guide"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["Excel Import", "State Data Scraper", "Primary Sales Import", "Data Status", "Local Setup Guide"])
 
 # ── Tab 1: Excel Import ──
 with tab1:
