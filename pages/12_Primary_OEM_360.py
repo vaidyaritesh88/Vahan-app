@@ -126,7 +126,10 @@ def _compute_yoy_row(pivot_numeric, row_name, ordered_labels, freq, incomplete):
 # ====================
 # SIDEBAR
 # ====================
-selected_cat = st.sidebar.selectbox("Category", CATEGORIES, key="pri_cat")
+cat_kwargs = {"key": "pri_cat"}
+if "pri_cat" not in st.session_state:
+    cat_kwargs["index"] = CATEGORIES.index("2W") if "2W" in CATEGORIES else 0
+selected_cat = st.sidebar.selectbox("Category", CATEGORIES, **cat_kwargs)
 
 if not has_primary_data(selected_cat):
     st.info(f"No primary sales data available for {selected_cat}. Import data first.")
@@ -137,7 +140,10 @@ if not oem_list:
     st.info(f"No OEMs found for {selected_cat}.")
     st.stop()
 
-selected_oem = st.sidebar.selectbox("OEM", oem_list, key="poem_oem")
+oem_kwargs = {"key": "poem_oem"}
+if "poem_oem" not in st.session_state and "Hero MotoCorp" in oem_list:
+    oem_kwargs["index"] = oem_list.index("Hero MotoCorp")
+selected_oem = st.sidebar.selectbox("OEM", oem_list, **oem_kwargs)
 
 preset, ref_year, ref_month = primary_period_selector(key="pri_period")
 if ref_year is None:

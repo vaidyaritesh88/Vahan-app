@@ -63,7 +63,10 @@ def _get_incomplete_periods(raw_data, freq):
 
 
 # SIDEBAR
-selected_cat = st.sidebar.selectbox("Category", BASE_CATS, key="cd_cat")
+cat_kwargs = {"key": "cd_cat"}
+if "cd_cat" not in st.session_state:
+    cat_kwargs["index"] = BASE_CATS.index("2W") if "2W" in BASE_CATS else 0
+selected_cat = st.sidebar.selectbox("Category", BASE_CATS, **cat_kwargs)
 preset, ref_year, ref_month = period_selector(key="cd_period")
 if ref_year is None:
     st.warning("No data loaded.")

@@ -53,7 +53,10 @@ if not states:
     st.warning("No states with data found.")
     st.stop()
 
-selected_state = st.sidebar.selectbox("State", states, key="sp_state")
+state_kwargs = {"key": "sp_state"}
+if "sp_state" not in st.session_state and "Uttar Pradesh" in states:
+    state_kwargs["index"] = states.index("Uttar Pradesh")
+selected_state = st.sidebar.selectbox("State", states, **state_kwargs)
 
 BASE_CATS = ["PV", "2W", "3W", "CV", "TRACTORS"]
 selected_cat = st.sidebar.selectbox("Category (for chart)", BASE_CATS, index=1, key="sp_cat")

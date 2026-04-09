@@ -203,7 +203,10 @@ def _build_segment_pivot(filtered_seg, freq, category, ordered_labels):
 # ====================
 # SIDEBAR
 # ====================
-selected_cat = st.sidebar.selectbox("Category", CATEGORIES, key="pri_cat")
+cat_kwargs = {"key": "pri_cat"}
+if "pri_cat" not in st.session_state:
+    cat_kwargs["index"] = CATEGORIES.index("2W") if "2W" in CATEGORIES else 0
+selected_cat = st.sidebar.selectbox("Category", CATEGORIES, **cat_kwargs)
 preset, ref_year, ref_month = primary_period_selector(key="pri_period")
 if ref_year is None:
     st.warning("No data loaded. Upload data or run scraper in Data Management.")

@@ -156,7 +156,10 @@ def _build_share_table(pivot_vol, ordered_labels):
 # ====================
 # SIDEBAR
 # ====================
-selected_cat = st.sidebar.selectbox("Category", CATEGORIES, key="pri_cat")
+cat_kwargs = {"key": "pri_cat"}
+if "pri_cat" not in st.session_state:
+    cat_kwargs["index"] = CATEGORIES.index("2W") if "2W" in CATEGORIES else 0
+selected_cat = st.sidebar.selectbox("Category", CATEGORIES, **cat_kwargs)
 
 # Populate sub-segment list ordered by config
 available_segments = get_primary_segments_list(selected_cat)
@@ -170,7 +173,10 @@ ordered_segments = [s for s in config_order if s in available_segments]
 remaining = [s for s in available_segments if s not in ordered_segments]
 ordered_segments.extend(remaining)
 
-selected_segment = st.sidebar.selectbox("Sub-Segment", ordered_segments, key="pss_segment")
+seg_kwargs = {"key": "pss_segment"}
+if "pss_segment" not in st.session_state and "Economy Segment" in ordered_segments:
+    seg_kwargs["index"] = ordered_segments.index("Economy Segment")
+selected_segment = st.sidebar.selectbox("Sub-Segment", ordered_segments, **seg_kwargs)
 
 preset, ref_year, ref_month = primary_period_selector(key="pri_period")
 if ref_year is None:

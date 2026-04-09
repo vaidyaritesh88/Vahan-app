@@ -97,7 +97,7 @@ st.markdown(_GROWTH_CSS, unsafe_allow_html=True)
 # ──────────────────────────────────────
 # SIDEBAR
 # ──────────────────────────────────────
-oem = oem_selector(key="oem360")
+oem = oem_selector(key="oem360", default_oem="Hero MotoCorp")
 preset, ref_year, ref_month = period_selector(key="oem360_period")
 
 if not oem or ref_year is None:

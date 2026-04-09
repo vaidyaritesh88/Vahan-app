@@ -56,7 +56,7 @@ PRIORITY_OEMS = [
 ]
 
 
-def oem_selector(category_code=None, key="oem", label="Select OEM"):
+def oem_selector(category_code=None, key="oem", label="Select OEM", default_oem=None):
     """OEM dropdown with major OEMs listed first, then alphabetical."""
     if category_code:
         oems = get_all_oems_for_category(category_code)
@@ -67,18 +67,19 @@ def oem_selector(category_code=None, key="oem", label="Select OEM"):
         return None
 
     oem_set = set(oems)
-    # Priority OEMs that exist in data, in defined order
     top = [o for o in PRIORITY_OEMS if o in oem_set]
-    # Remaining OEMs alphabetically
     rest = sorted([o for o in oems if o not in set(top)])
-    # Combine with separator
     if top and rest:
-        ordered = top + ["─" * 30] + rest  # horizontal line separator
+        ordered = top + ["─" * 30] + rest
     else:
         ordered = top + rest
 
-    selected = st.sidebar.selectbox(label, ordered, key=key)
-    # If user somehow selects the separator, default to first OEM
+    # Set default index based on default_oem, preserve session state
+    sel_kwargs = {"key": key}
+    if key not in st.session_state and default_oem and default_oem in ordered:
+        sel_kwargs["index"] = ordered.index(default_oem)
+
+    selected = st.sidebar.selectbox(label, ordered, **sel_kwargs)
     if selected and "─" in selected:
         selected = ordered[0]
     return selected
@@ -118,31 +119,44 @@ def base_category_selector(key="base_cat"):
     return options[selected]
 
 
-def period_selector(key="period_preset", label="Analysis Period"):
+def period_selector(key="period_preset", label="Analysis Period", default_preset="Last 3Y"):
     """Period preset selector. Returns (preset_name, year, month) for the reference month.
 
     Defaults to last COMPLETED month (not current month which may have partial data).
+    Session state is preserved across tab switches.
     """
     months = get_available_months()
     if not months:
         st.sidebar.warning("No data loaded yet.")
         return None, None, None
 
-    preset = st.sidebar.selectbox(label, list(PERIOD_PRESETS.keys()), key=f"{key}_preset")
+    preset_key = f"{key}_preset"
+    ref_key = f"{key}_ref"
 
-    # Default to last completed month (skip current month if it's in the list)
+    # Analysis period — default to specified preset, preserve session state
+    preset_options = list(PERIOD_PRESETS.keys())
+    preset_kwargs = {"key": preset_key}
+    if preset_key not in st.session_state:
+        default_idx = preset_options.index(default_preset) if default_preset in preset_options else 0
+        preset_kwargs["index"] = default_idx
+    preset = st.sidebar.selectbox(label, preset_options, **preset_kwargs)
+
+    # Reference month — default to last completed month, preserve session state
     from datetime import date as _date
     _today = _date.today()
-    default_idx = 0
-    for i, (y, m) in enumerate(months):
-        if y == _today.year and m == _today.month:
-            continue  # Skip current (partial) month
-        default_idx = i
-        break
-
-    # Reference month selector
     options = [f"{format_month(y, m)}" for y, m in months]
-    selected = st.sidebar.selectbox("Reference Month", options, index=default_idx, key=f"{key}_ref")
+
+    ref_kwargs = {"key": ref_key, "help": "The latest month to include in the analysis. Defaults to the last fully completed month (current partial month is excluded)."}
+    if ref_key not in st.session_state:
+        default_ref_idx = 0
+        for i, (y, m) in enumerate(months):
+            if y == _today.year and m == _today.month:
+                continue
+            default_ref_idx = i
+            break
+        ref_kwargs["index"] = default_ref_idx
+
+    selected = st.sidebar.selectbox("Reference Month", options, **ref_kwargs)
     idx = options.index(selected)
     year, month = months[idx]
 
@@ -163,7 +177,7 @@ def main_category_selector(key="main_cat", label="Select Category"):
     selected = st.sidebar.selectbox(label, list(options.keys()), key=key)
     return options[selected], selected
 
-def primary_period_selector(key="ps_period", label="Analysis Period"):
+def primary_period_selector(key="ps_period", label="Analysis Period", default_preset="Last 3Y"):
     """Period preset selector using primary_sales data range (not national_monthly).
 
     Returns (preset_name, year, month).
@@ -175,19 +189,18 @@ def primary_period_selector(key="ps_period", label="Analysis Period"):
         st.sidebar.warning("No primary sales data loaded yet.")
         return None, None, None
 
-    # Only set default index on first render — don't override session state on tab switch
     preset_key = f"{key}_preset"
     ref_key = f"{key}_ref"
 
-    # Don't pass index if key already in session state (preserves user's selection)
+    preset_options = list(PERIOD_PRESETS.keys())
     preset_kwargs = {"key": preset_key}
     if preset_key not in st.session_state:
-        preset_kwargs["index"] = 0
-    preset = st.sidebar.selectbox(label, list(PERIOD_PRESETS.keys()), **preset_kwargs)
+        default_idx = preset_options.index(default_preset) if default_preset in preset_options else 0
+        preset_kwargs["index"] = default_idx
+    preset = st.sidebar.selectbox(label, preset_options, **preset_kwargs)
 
-    # Default to last completed month (only on first render)
     options = [f"{format_month(y, m)}" for y, m in months]
-
+    ref_kwargs = {"key": ref_key, "help": "The latest month to include in the analysis. Defaults to the last fully completed month (current partial month is excluded)."}
     if ref_key not in st.session_state:
         from datetime import date as _date
         _today = _date.today()
@@ -197,9 +210,9 @@ def primary_period_selector(key="ps_period", label="Analysis Period"):
                 continue
             default_idx = i
             break
-        selected = st.sidebar.selectbox("Reference Month", options, index=default_idx, key=ref_key)
-    else:
-        selected = st.sidebar.selectbox("Reference Month", options, key=ref_key)
+        ref_kwargs["index"] = default_idx
+
+    selected = st.sidebar.selectbox("Reference Month", options, **ref_kwargs)
     idx = options.index(selected)
     year, month = months[idx]
 
