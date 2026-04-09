@@ -270,7 +270,7 @@ for col in vol_display.columns:
         lambda v: f"{int(v):,}" if pd.notna(v) and v > 0 else "\u2014"
     )
 vol_display.index.name = "Category"
-st.dataframe(vol_display, use_container_width=True)
+st.dataframe(vol_display.iloc[:, ::-1], use_container_width=True)
 
 # Table B: YoY Growth %
 st.markdown("**YoY Growth %**")
@@ -314,7 +314,7 @@ for cat in row_labels:
             yoy_result.loc[cat, col] = "\u2014"
 
 yoy_result.index.name = "Category"
-st.dataframe(yoy_result, use_container_width=True)
+st.dataframe(yoy_result.iloc[:, ::-1], use_container_width=True)
 
 # Table C: Category Mix %
 st.markdown("**Category Mix %**")
@@ -332,7 +332,7 @@ for col in mix_display.columns:
         mix_display[col] = "\u2014"
 
 mix_display.index.name = "Category"
-st.dataframe(mix_display, use_container_width=True)
+st.dataframe(mix_display.iloc[:, ::-1], use_container_width=True)
 
 # ── Category Mix % Trend (line chart) ──
 st.markdown("**Category Mix % Trend**")

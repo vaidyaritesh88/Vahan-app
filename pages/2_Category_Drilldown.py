@@ -278,7 +278,7 @@ for col in vol_display.columns:
         lambda v: f"{int(v):,}" if pd.notna(v) and v > 0 else "\u2014"
     )
 vol_display.index.name = "OEM"
-st.dataframe(vol_display, use_container_width=True)
+st.dataframe(vol_display.iloc[:, ::-1], use_container_width=True)
 
 # Table B: YoY Growth %
 with st.expander("YoY Growth %"):
@@ -322,7 +322,7 @@ with st.expander("YoY Growth %"):
                 yoy_result.loc[oem, col] = "\u2014"
 
     yoy_result.index.name = "OEM"
-    st.dataframe(yoy_result, use_container_width=True)
+    st.dataframe(yoy_result.iloc[:, ::-1], use_container_width=True)
 
 # Table C: Market Share %
 with st.expander("Market Share %"):
@@ -339,7 +339,7 @@ with st.expander("Market Share %"):
             share_display[col] = "\u2014"
 
     share_display.index.name = "OEM"
-    st.dataframe(share_display, use_container_width=True)
+    st.dataframe(share_display.iloc[:, ::-1], use_container_width=True)
 
 st.divider()
 

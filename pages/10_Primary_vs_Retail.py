@@ -285,7 +285,7 @@ if freq == "monthly":
 
 tbl_df = pd.DataFrame(tbl_data, index=periods).T
 tbl_df.index.name = "Metric"
-st.dataframe(tbl_df, width="stretch")
+st.dataframe(tbl_df.iloc[:, ::-1], width="stretch")
 
 caption_text = (
     "**Gap** = Primary YoY - Retail YoY. "
@@ -404,7 +404,7 @@ idx_tbl = {
 }
 idx_tbl_df = pd.DataFrame(idx_tbl, index=idx_periods).T
 idx_tbl_df.index.name = "Metric"
-st.dataframe(idx_tbl_df, width="stretch")
+st.dataframe(idx_tbl_df.iloc[:, ::-1], width="stretch")
 
 st.caption(
     "**How to read this chart:** The gap between the Primary and Retail index lines "
