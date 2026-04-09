@@ -74,3 +74,14 @@ def get_super_segment_order(category):
     if category == "PV":
         return ["Total PC", "Total SUV"]
     return ["Motorcycle", "Scooter", "Moped", "EV"]
+
+# Display name overrides — "Scooter" is ICE scooters only (EVs are in EV segment)
+SEGMENT_DISPLAY_NAMES = {
+    "Scooter": "ICE Scooter",
+}
+
+
+def get_segment_display_name(segment):
+    """Get the display name for a segment (may differ from DB storage name)."""
+    return SEGMENT_DISPLAY_NAMES.get(segment, segment)
+

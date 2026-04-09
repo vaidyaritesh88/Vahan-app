@@ -19,6 +19,7 @@ from database.queries import (
 )
 from config.primary_sales_config import (
     get_segment_order, get_super_segments, get_super_segment_order,
+    get_segment_display_name,
 )
 from components.filters import primary_period_selector
 from components.formatters import format_units, format_month, get_fy_label
@@ -413,13 +414,21 @@ if has_seg_data and not oem_seg_filtered.empty:
             if not present_children:
                 continue
 
-            for seg in present_children:
-                display_rows.append((f"  {seg}", pivot_seg.loc[seg], False))  # 2-space indent
+            # Skip subtotal if super-segment has only 1 member (would duplicate the leaf)
+            render_subtotal = len(present_children) > 1
 
-            # Always add subtotal for super-segments
-            if present_children:
+            for seg in present_children:
+                display_seg = get_segment_display_name(seg)
+                if render_subtotal:
+                    display_rows.append((f"  {display_seg}", pivot_seg.loc[seg], False))
+                else:
+                    # Single-member: no indent, no subtotal
+                    display_rows.append((display_seg, pivot_seg.loc[seg], False))
+
+            # Only add subtotal for multi-member super-segments
+            if render_subtotal:
                 subtotal = pivot_seg.loc[present_children].sum(axis=0)
-                display_rows.append((ss_name, subtotal, True))  # No indent for subtotals
+                display_rows.append((ss_name, subtotal, True))
 
         # Add segments not in any super-segment (indented)
         known_segs = set()

@@ -19,6 +19,7 @@ from database.queries import (
 )
 from config.primary_sales_config import (
     get_segment_order, get_super_segments, get_super_segment_order,
+    get_segment_display_name,
 )
 from components.filters import primary_period_selector, top_n_selector
 from components.formatters import format_units, format_month, get_fy_label
@@ -197,10 +198,20 @@ def _build_segment_pivot(filtered_seg, freq, category, ordered_labels):
     row_order = []
     for ss_name in super_order:
         members = [s for s in super_segs[ss_name] if s in pivot.index]
+        # Determine if we should render a subtotal row:
+        # Skip if super-segment has only 1 member (subtotal would duplicate the leaf)
+        render_subtotal = len(members) > 1
+
         for seg in members:
             rows.append(pivot.loc[seg])
-            row_order.append(f"  {seg}")  # 2-space indent for sub-segments
-        if ss_name in subtotals:
+            # Use display name (e.g., "Scooter" -> "ICE Scooter")
+            display_seg = get_segment_display_name(seg)
+            if render_subtotal:
+                row_order.append(f"  {display_seg}")  # Indent under subtotal
+            else:
+                # Single-member super-segment: render without indent, no subtotal
+                row_order.append(display_seg)
+        if render_subtotal and ss_name in subtotals:
             rows.append(subtotals[ss_name])
             row_order.append(ss_name)  # No indent for subtotals
 
@@ -209,10 +220,12 @@ def _build_segment_pivot(filtered_seg, freq, category, ordered_labels):
 
     final = pd.DataFrame(rows, index=row_order, columns=ordered_labels)
 
-    # Identify bold rows (subtotals + grand total)
+    # Identify bold rows (only subtotals that were actually rendered + grand total)
     bold_rows = set()
-    for ss_name in subtotals:
-        bold_rows.add(ss_name)
+    for ss_name in super_order:
+        members = [s for s in super_segs[ss_name] if s in pivot.index]
+        if len(members) > 1 and ss_name in subtotals:
+            bold_rows.add(ss_name)
     bold_rows.add(grand_total_label)
 
     return final, row_order, bold_rows
