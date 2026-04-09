@@ -1745,13 +1745,12 @@ def get_primary_latest_month():
 def get_primary_import_stats():
     """Get summary stats about imported primary sales data."""
     conn = get_connection()
-    stats = {}
     row = conn.execute("""
         SELECT COUNT(*) as cnt,
                COUNT(DISTINCT category) as cats,
                COUNT(DISTINCT oem_name) as oems,
-               MIN(year||\'-\'||printf(\' %02d\',month)) as first_month,
-               MAX(year||\'-\'||printf(\' %02d\',month)) as last_month,
+               MIN(year || '-' || printf('%02d', month)) as first_month,
+               MAX(year || '-' || printf('%02d', month)) as last_month,
                MAX(updated_at) as last_import
         FROM primary_sales
         WHERE month BETWEEN 1 AND 12
