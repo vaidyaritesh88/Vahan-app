@@ -35,7 +35,7 @@ st.markdown("""
 | **Granularity** | Monthly, by OEM, by Model, by Sub-segment (Entry HB, Compact SUV, etc.) |
 | **Coverage** | All India (complete national coverage) |
 | **History** | PV: October 2014 onwards; 2W: June 2008 onwards |
-| **Update frequency** | Monthly, typically within 1-2 days of month-end |
+| **Update frequency** | Monthly, typically within 15-20 days of month-end |
 | **Import method** | Excel upload via Data Management page |
 """)
 
