@@ -42,6 +42,7 @@ pages = {
     "Tools": [
         st.Page("pages/6_Data_Management.py", title="Data Management", icon=":material/settings:"),
         st.Page("pages/8_AI_Chat.py", title="AI Chat", icon=":material/chat:"),
+        st.Page("pages/13_Sources.py", title="Sources & Definitions", icon=":material/info:"),
     ],
 }
 
