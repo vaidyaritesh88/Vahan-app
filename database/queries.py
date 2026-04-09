@@ -1767,3 +1767,89 @@ def get_primary_import_stats():
         }
     return None
 
+# ── Additional Primary Sales queries for sub-segment and OEM analysis ──
+
+def get_primary_model_monthly(category, segment):
+    """Per-model monthly data for a specific sub-segment.
+
+    Returns DataFrame: year, month, oem_name, model_name, volume
+    """
+    return _query_df("""
+        SELECT year, month, oem_name, model_name, SUM(volume) as volume
+        FROM primary_sales
+        WHERE category = ? AND segment = ? AND month BETWEEN 1 AND 12
+        GROUP BY year, month, oem_name, model_name
+        ORDER BY year, month
+    """, [category, segment])
+
+
+def get_primary_oem_in_segment(category, segment):
+    """Per-OEM monthly data within a specific sub-segment (aggregated from models).
+
+    Returns DataFrame: year, month, oem_name, volume
+    """
+    return _query_df("""
+        SELECT year, month, oem_name, SUM(volume) as volume
+        FROM primary_sales
+        WHERE category = ? AND segment = ? AND month BETWEEN 1 AND 12
+        GROUP BY year, month, oem_name
+        ORDER BY year, month
+    """, [category, segment])
+
+
+def get_primary_oem_total(oem_name, category):
+    """Single OEM total monthly volume in a category.
+
+    Returns DataFrame: year, month, volume
+    """
+    return _query_df("""
+        SELECT year, month, SUM(volume) as volume
+        FROM primary_sales
+        WHERE oem_name = ? AND category = ? AND month BETWEEN 1 AND 12
+        GROUP BY year, month
+        ORDER BY year, month
+    """, [oem_name, category])
+
+
+def get_primary_oem_segments(oem_name, category):
+    """OEM segment breakdown monthly.
+
+    Returns DataFrame: year, month, segment, volume
+    """
+    return _query_df("""
+        SELECT year, month, segment, SUM(volume) as volume
+        FROM primary_sales
+        WHERE oem_name = ? AND category = ? AND month BETWEEN 1 AND 12
+        GROUP BY year, month, segment
+        ORDER BY year, month
+    """, [oem_name, category])
+
+
+def get_primary_segments_list(category):
+    """List of segments with data for a category.
+
+    Returns list of segment names.
+    """
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT DISTINCT segment FROM primary_sales WHERE category = ? ORDER BY segment",
+        (category,)
+    ).fetchall()
+    conn.close()
+    return [r['segment'] for r in rows]
+
+
+def get_primary_oems_list(category):
+    """List of OEMs with data for a category, ordered by total volume desc.
+
+    Returns list of OEM names.
+    """
+    conn = get_connection()
+    rows = conn.execute("""
+        SELECT oem_name, SUM(volume) as total
+        FROM primary_sales WHERE category = ? AND month BETWEEN 1 AND 12
+        GROUP BY oem_name ORDER BY total DESC
+    """, (category,)).fetchall()
+    conn.close()
+    return [r['oem_name'] for r in rows]
+

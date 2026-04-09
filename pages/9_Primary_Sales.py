@@ -1,16 +1,11 @@
-"""Page 9: Primary Sales - Wholesale/dispatch sales analysis for Indian auto OEMs.
+"""Page 9: Primary Sales - Wholesale/dispatch sales analysis with PC/UV grouping.
 
-Follows Category Overview / Category Drilldown patterns:
-  - Period selector + Frequency (Monthly/Quarterly/FY)
-  - Incomplete period handling
-  - Transposed data tables with full numbers
-  - Dual-axis bar+line chart
-  - Market share line chart
+All analysis via TABLES except the category trend dual-axis bar+line chart.
+Segment tables include super-segment subtotals (PC/UV for PV, Motorcycle etc for 2W).
 """
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
 import sys, os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -21,8 +16,11 @@ from database.queries import (
     get_primary_segment_monthly, get_primary_import_stats,
     has_primary_data, get_last_scrape_info,
 )
+from config.primary_sales_config import (
+    get_segment_order, get_super_segments, get_super_segment_order,
+)
 from components.filters import period_selector, top_n_selector
-from components.formatters import format_units, format_month, format_pct, OEM_COLORS
+from components.formatters import format_units, format_month
 from components.charts import dual_axis_bar_line
 from components.analysis import (
     aggregate_by_frequency, filter_by_period, get_period_months, add_fy_columns,
@@ -32,7 +30,6 @@ init_db()
 
 st.set_page_config(page_title="Primary Sales", page_icon="\U0001f4e6", layout="wide")
 
-# CSS for right-aligned tables
 st.markdown("""
 <style>
 div[data-testid="stDataFrame"] td { text-align: right !important; }
@@ -78,6 +75,108 @@ def _get_incomplete_periods(raw_data, freq):
     return set()
 
 
+def _compute_yoy_table(pivot_vol, row_labels, ordered_labels, freq, incomplete_periods):
+    """Build a YoY growth % DataFrame from a volume pivot table."""
+    data = pivot_vol.copy().astype(float)
+    result = pd.DataFrame(index=row_labels, columns=ordered_labels, dtype=object)
+
+    for label in row_labels:
+        for col_idx, col in enumerate(ordered_labels):
+            if col in incomplete_periods:
+                result.loc[label, col] = "\u2014"
+                continue
+
+            curr = data.loc[label, col] if label in data.index and col in data.columns else None
+
+            if freq == "monthly" and col_idx >= 12:
+                prev_label = ordered_labels[col_idx - 12]
+            elif freq == "quarterly" and col_idx >= 4:
+                prev_label = ordered_labels[col_idx - 4]
+            elif freq == "annual" and col_idx >= 1:
+                prev_label = ordered_labels[col_idx - 1]
+            else:
+                prev_label = None
+
+            if prev_label and prev_label in incomplete_periods:
+                result.loc[label, col] = "\u2014"
+                continue
+
+            if prev_label and prev_label in data.columns:
+                prev = data.loc[label, prev_label] if label in data.index else None
+                if pd.notna(curr) and pd.notna(prev) and prev > 0:
+                    yoy_val = round(((curr / prev) - 1) * 100, 1)
+                    result.loc[label, col] = _fmt_growth(yoy_val)
+                else:
+                    result.loc[label, col] = "\u2014"
+            else:
+                result.loc[label, col] = "\u2014"
+    return result
+
+
+def _build_segment_pivot(filtered_seg, freq, category, ordered_labels):
+    """Build segment volume pivot with super-segment subtotals in correct order.
+
+    Returns (pivot_df, row_order) where row_order includes segments,
+    subtotals, and grand total in the specified display order.
+    """
+    seg_order = get_segment_order(category)
+    super_segs = get_super_segments(category)
+    super_order = get_super_segment_order(category)
+
+    # Aggregate each segment
+    seg_agg_frames = []
+    for seg in seg_order:
+        seg_slice = filtered_seg[filtered_seg["segment"] == seg].copy()
+        if seg_slice.empty:
+            continue
+        agg = aggregate_by_frequency(seg_slice, freq)
+        agg["segment"] = seg
+        seg_agg_frames.append(agg)
+
+    if not seg_agg_frames:
+        return None, None, None
+
+    seg_tables = pd.concat(seg_agg_frames, ignore_index=True)
+    seg_tables["label"] = seg_tables.apply(lambda r: _period_lbl(r, freq), axis=1)
+
+    pivot = seg_tables.pivot_table(
+        index="segment", columns="label", values="volume", aggfunc="sum"
+    )
+    pivot = pivot.reindex(columns=ordered_labels).fillna(0)
+
+    # Compute subtotals for each super-segment
+    subtotals = {}
+    for ss_name in super_order:
+        members = [s for s in super_segs[ss_name] if s in pivot.index]
+        if members:
+            subtotals[ss_name] = pivot.loc[members].sum(axis=0)
+
+    grand_total = pivot.sum(axis=0)
+    grand_total_label = f"{category} TOTAL"
+
+    # Assemble rows in correct order
+    rows = []
+    row_order = []
+    for ss_name in super_order:
+        members = [s for s in super_segs[ss_name] if s in pivot.index]
+        for seg in members:
+            rows.append(pivot.loc[seg])
+            row_order.append(seg)
+        if ss_name in subtotals:
+            rows.append(subtotals[ss_name])
+            row_order.append(ss_name)
+
+    rows.append(grand_total)
+    row_order.append(grand_total_label)
+
+    final = pd.DataFrame(rows, index=row_order, columns=ordered_labels)
+
+    # Identify bold rows (subtotals + grand total)
+    bold_rows = set(subtotals.keys()) | {grand_total_label}
+
+    return final, row_order, bold_rows
+
+
 # ====================
 # SIDEBAR
 # ====================
@@ -95,6 +194,16 @@ top_n = top_n_selector(key="ps_topn")
 
 st.sidebar.divider()
 
+_import_stats = get_primary_import_stats()
+if _import_stats:
+    with st.sidebar.expander("\U0001f4e6 Primary Data Import", expanded=False):
+        st.caption(f"**Records:** {_import_stats.get('total_records', 0):,}")
+        st.caption(f"**OEMs:** {_import_stats.get('oem_count', 0)}")
+        st.caption(f"**Range:** {_import_stats.get('first_month', '')} to {_import_stats.get('last_month', '')}")
+        last_imp = _import_stats.get("last_import")
+        if last_imp:
+            st.caption(f"**Last import:** {str(last_imp)[:16]}")
+
 _scrape_info = get_last_scrape_info()
 if _scrape_info:
     with st.sidebar.expander("\U0001f504 Last Scraped", expanded=False):
@@ -102,14 +211,6 @@ if _scrape_info:
             stype = si["scrape_type"].replace("national_", "N:").replace("state_", "S:")
             ts = si["last_completed"][:16] if si["last_completed"] else "Never"
             st.caption(f"**{stype}** \u2014 {ts}")
-
-_import_stats = get_primary_import_stats()
-if _import_stats:
-    with st.sidebar.expander("\U0001f4e6 Primary Data Import", expanded=False):
-        st.caption(f"**Total records:** {_import_stats.get('total_records', 0):,}")
-        last_imp = _import_stats.get("last_import")
-        if last_imp:
-            st.caption(f"**Last import:** {str(last_imp)[:16]}")
 
 
 # ====================
@@ -155,7 +256,6 @@ if ref_month >= fy_start_month:
     fy_year = ref_year
 else:
     fy_year = ref_year - 1
-fytd_months = list(range(fy_start_month, 13)) + list(range(1, ref_month + 1)) if ref_month < fy_start_month else list(range(fy_start_month, ref_month + 1))
 
 fytd_data = cat_monthly[
     ((cat_monthly["year"] == fy_year) & (cat_monthly["month"] >= fy_start_month)) |
@@ -174,19 +274,17 @@ col1, col2, col3, col4 = st.columns(4)
 with col1:
     st.metric("Total Volume", format_units(ref_vol))
 with col2:
-    delta = f"{yoy:+.1f}%" if yoy is not None else None
-    st.metric("YoY Growth", delta if delta else "N/A")
+    st.metric("YoY Growth", f"{yoy:+.1f}%" if yoy is not None else "N/A")
 with col3:
     st.metric("FYTD Volume", format_units(fytd_vol))
 with col4:
-    fytd_delta = f"{fytd_yoy:+.1f}%" if fytd_yoy is not None else None
-    st.metric("FYTD YoY", fytd_delta if fytd_delta else "N/A")
+    st.metric("FYTD YoY", f"{fytd_yoy:+.1f}%" if fytd_yoy is not None else "N/A")
 
 st.divider()
 
 
 # ====================
-# SECTION 2: CATEGORY TREND (dual-axis)
+# SECTION 2: CATEGORY TREND (dual-axis bar+line)
 # ====================
 st.subheader(f"{selected_cat} Primary Sales Trend")
 
@@ -205,8 +303,7 @@ else:
             lambda r: pd.Timestamp(
                 int(r["fy"]) + (1 if r["quarter"] == 4 else 0),
                 {1: 5, 2: 8, 3: 11, 4: 2}[int(r["quarter"])], 1
-            ),
-            axis=1,
+            ), axis=1,
         )
         cat_agg["period_label"] = cat_agg["q_label"]
     else:
@@ -218,7 +315,7 @@ else:
 
 cat_agg = cat_agg.sort_values("date")
 
-# Compute YoY from full dataset
+# YoY from full dataset
 full_cat = add_fy_columns(cat_monthly.copy())
 
 
@@ -236,9 +333,7 @@ def _get_cat_yoy(row):
     if prev.empty:
         return None
     pv = prev["volume"].sum()
-    if pv <= 0:
-        return None
-    return round(((row["volume"] / pv) - 1) * 100, 1)
+    return round(((row["volume"] / pv) - 1) * 100, 1) if pv > 0 else None
 
 
 cat_agg["yoy_pct"] = cat_agg.apply(_get_cat_yoy, axis=1)
@@ -258,20 +353,24 @@ if not chart_df.empty:
     st.plotly_chart(fig, use_container_width=True)
 else:
     import plotly.express as px
-
     fig = px.bar(cat_agg, x="label", y="volume", title=f"{selected_cat} Primary Sales")
     fig.update_layout(height=420)
     st.plotly_chart(fig, use_container_width=True)
 
 st.divider()
 
+# Common ordered labels from cat_agg for all tables
+ordered_labels = cat_agg.sort_values("date")["label"].unique().tolist()
+
 
 # ====================
-# SECTION 3: SEGMENT DATA TABLES
+# SECTION 3: SEGMENT VOLUME TABLE (with subtotals)
 # ====================
 st.subheader(f"Segment Data \u2014 {selected_cat}")
 
 seg_monthly = get_primary_segment_monthly(selected_cat)
+seg_pivot = None
+
 if not seg_monthly.empty:
     seg_monthly["date"] = pd.to_datetime(
         seg_monthly["year"].astype(str) + "-" + seg_monthly["month"].astype(str).str.zfill(2) + "-01"
@@ -279,103 +378,44 @@ if not seg_monthly.empty:
     filtered_seg = filter_by_period(seg_monthly, start_date, end_date)
 
     if not filtered_seg.empty:
-        segments = filtered_seg["segment"].unique().tolist()
+        result = _build_segment_pivot(filtered_seg, freq, selected_cat, ordered_labels)
+        if result[0] is not None:
+            seg_pivot, seg_row_order, bold_rows = result
 
-        seg_agg_frames = []
-        for seg in segments:
-            seg_slice = filtered_seg[filtered_seg["segment"] == seg].copy()
-            if seg_slice.empty:
-                continue
-            agg = aggregate_by_frequency(seg_slice, freq)
-            agg["segment"] = seg
-            seg_agg_frames.append(agg)
-
-        if seg_agg_frames:
-            seg_tables = pd.concat(seg_agg_frames, ignore_index=True)
-            seg_tables["label"] = seg_tables.apply(lambda r: _period_lbl(r, freq), axis=1)
-
-            pivot_seg = seg_tables.pivot_table(
-                index="segment", columns="label", values="volume", aggfunc="sum"
-            )
-
-            ordered_labels_seg = seg_tables.sort_values("date")["label"].unique().tolist()
-            pivot_seg = pivot_seg.reindex(columns=ordered_labels_seg)
-
-            total_row = pivot_seg.sum(axis=0)
-            total_row.name = "TOTAL"
-            pivot_seg = pd.concat([pivot_seg, total_row.to_frame().T])
-
-            # Table A: Segment Volume
+            # Table: Segment Volume
             st.markdown("**Segment Volume (units)**")
-            seg_vol_display = pivot_seg.copy()
-            for col in seg_vol_display.columns:
-                seg_vol_display[col] = seg_vol_display[col].apply(
-                    lambda v: f"{int(v):,}" if pd.notna(v) and v > 0 else "\u2014"
-                )
-            seg_vol_display.index.name = "Segment"
-            st.dataframe(seg_vol_display, use_container_width=True)
+            vol_disp = seg_pivot.copy()
+            for col in vol_disp.columns:
+                vol_disp[col] = vol_disp[col].apply(_fmt_vol)
+            vol_disp.index.name = "Segment"
+            st.dataframe(vol_disp, use_container_width=True)
 
-            # Table B: Segment YoY Growth %
+            # Section 4: Segment YoY Growth (expander)
             with st.expander("Segment YoY Growth %"):
-                seg_yoy_data = pivot_seg.copy().astype(float)
-                seg_row_labels = [s for s in segments if s in seg_yoy_data.index] + ["TOTAL"]
-                seg_yoy_result = pd.DataFrame(index=seg_row_labels, columns=ordered_labels_seg, dtype=object)
+                seg_yoy = _compute_yoy_table(
+                    seg_pivot, seg_row_order, ordered_labels, freq, incomplete_periods
+                )
+                seg_yoy.index.name = "Segment"
+                st.dataframe(seg_yoy, use_container_width=True)
 
-                for seg in seg_row_labels:
-                    for col_idx, col in enumerate(ordered_labels_seg):
-                        if col in incomplete_periods:
-                            seg_yoy_result.loc[seg, col] = "\u2014"
-                            continue
-
-                        curr = (
-                            seg_yoy_data.loc[seg, col]
-                            if seg in seg_yoy_data.index and col in seg_yoy_data.columns
-                            else None
-                        )
-
-                        if freq == "monthly" and col_idx >= 12:
-                            prev_label = ordered_labels_seg[col_idx - 12]
-                        elif freq == "quarterly" and col_idx >= 4:
-                            prev_label = ordered_labels_seg[col_idx - 4]
-                        elif freq == "annual" and col_idx >= 1:
-                            prev_label = ordered_labels_seg[col_idx - 1]
-                        else:
-                            prev_label = None
-
-                        if prev_label and prev_label in incomplete_periods:
-                            seg_yoy_result.loc[seg, col] = "\u2014"
-                            continue
-
-                        if prev_label and prev_label in seg_yoy_data.columns:
-                            prev = seg_yoy_data.loc[seg, prev_label]
-                            if pd.notna(curr) and pd.notna(prev) and prev > 0:
-                                yoy_val = round(((curr / prev) - 1) * 100, 1)
-                                seg_yoy_result.loc[seg, col] = f"{yoy_val:+.1f}%"
-                            else:
-                                seg_yoy_result.loc[seg, col] = "\u2014"
-                        else:
-                            seg_yoy_result.loc[seg, col] = "\u2014"
-
-                seg_yoy_result.index.name = "Segment"
-                st.dataframe(seg_yoy_result, use_container_width=True)
-
-            # Table C: Segment Mix %
+            # Section 5: Segment Mix % (expander)
             with st.expander("Segment Mix %"):
-                seg_no_total = pivot_seg.drop("TOTAL", errors="ignore")
-                seg_totals = seg_no_total.sum(axis=0)
-                seg_mix_display = seg_no_total.copy()
-
-                for col in seg_mix_display.columns:
-                    total = seg_totals[col]
+                grand_label = f"{selected_cat} TOTAL"
+                totals_row = seg_pivot.loc[grand_label] if grand_label in seg_pivot.index else seg_pivot.sum(axis=0)
+                mix_disp = seg_pivot.copy()
+                # Only show individual segments (not subtotals/grand total)
+                for col in mix_disp.columns:
+                    total = totals_row[col]
                     if pd.notna(total) and total > 0:
-                        seg_mix_display[col] = seg_mix_display[col].apply(
-                            lambda v, t=total: f"{v / t * 100:.1f}%" if pd.notna(v) else "\u2014"
+                        mix_disp[col] = mix_disp[col].apply(
+                            lambda v, t=total: f"{v / t * 100:.1f}%" if pd.notna(v) and v > 0 else "\u2014"
                         )
                     else:
-                        seg_mix_display[col] = "\u2014"
-
-                seg_mix_display.index.name = "Segment"
-                st.dataframe(seg_mix_display, use_container_width=True)
+                        mix_disp[col] = "\u2014"
+                mix_disp.index.name = "Segment"
+                st.dataframe(mix_disp, use_container_width=True)
+        else:
+            st.info("No segment data for the selected period.")
     else:
         st.info("No segment data for the selected period.")
 else:
@@ -385,7 +425,7 @@ st.divider()
 
 
 # ====================
-# SECTION 4: OEM DATA TABLES
+# SECTION 6: OEM VOLUME TABLE
 # ====================
 st.subheader(f"OEM Data \u2014 {selected_cat}")
 
@@ -402,7 +442,7 @@ if filtered_oem.empty:
     st.info("No OEM data for the selected period.")
     st.stop()
 
-# Determine top N OEMs by reference month volume
+# Top N OEMs by reference month volume
 ref_oem = oem_monthly[
     (oem_monthly["year"] == ref_year) & (oem_monthly["month"] == ref_month)
 ].copy()
@@ -412,157 +452,74 @@ if ref_oem.empty:
 top_oems = ref_oem.nlargest(top_n, "volume")["oem_name"].tolist()
 
 # Aggregate per OEM
-agg_frames = []
+oem_agg_frames = []
 for oem_name in top_oems:
     oem_slice = filtered_oem[filtered_oem["oem_name"] == oem_name].copy()
     if oem_slice.empty:
         continue
     agg = aggregate_by_frequency(oem_slice, freq)
     agg["oem_name"] = oem_name
-    agg_frames.append(agg)
+    oem_agg_frames.append(agg)
 
 # Others
 others = filtered_oem[~filtered_oem["oem_name"].isin(top_oems)].copy()
 if not others.empty:
     others_agg = aggregate_by_frequency(others, freq)
     others_agg["oem_name"] = "Others"
-    agg_frames.append(others_agg)
+    oem_agg_frames.append(others_agg)
 
-if not agg_frames:
+if not oem_agg_frames:
     st.info("No OEM data for tables.")
     st.stop()
 
-tables_agg = pd.concat(agg_frames, ignore_index=True)
-tables_agg["label"] = tables_agg.apply(lambda r: _period_lbl(r, freq), axis=1)
+oem_tables = pd.concat(oem_agg_frames, ignore_index=True)
+oem_tables["label"] = oem_tables.apply(lambda r: _period_lbl(r, freq), axis=1)
 
-pivot_vol = tables_agg.pivot_table(
+oem_pivot = oem_tables.pivot_table(
     index="oem_name", columns="label", values="volume", aggfunc="sum"
 )
+oem_pivot = oem_pivot.reindex(columns=ordered_labels).fillna(0)
 
-ordered_labels = tables_agg.sort_values("date")["label"].unique().tolist()
-pivot_vol = pivot_vol.reindex(columns=ordered_labels)
-
-oem_order = [o for o in top_oems if o in pivot_vol.index]
-if "Others" in pivot_vol.index:
+oem_order = [o for o in top_oems if o in oem_pivot.index]
+if "Others" in oem_pivot.index:
     oem_order.append("Others")
-pivot_vol = pivot_vol.reindex(oem_order)
+oem_pivot = oem_pivot.reindex(oem_order)
 
-total_row = pivot_vol.sum(axis=0)
+total_row = oem_pivot.sum(axis=0)
 total_row.name = "TOTAL"
-pivot_vol = pd.concat([pivot_vol, total_row.to_frame().T])
+oem_pivot = pd.concat([oem_pivot, total_row.to_frame().T])
 
-# Table A: OEM Volume
+oem_row_labels = oem_order + ["TOTAL"]
+
+# Table: OEM Volume
 st.markdown("**OEM Volume (units)**")
-vol_display = pivot_vol.copy()
-for col in vol_display.columns:
-    vol_display[col] = vol_display[col].apply(
-        lambda v: f"{int(v):,}" if pd.notna(v) and v > 0 else "\u2014"
-    )
-vol_display.index.name = "OEM"
-st.dataframe(vol_display, use_container_width=True)
+oem_vol_disp = oem_pivot.copy()
+for col in oem_vol_disp.columns:
+    oem_vol_disp[col] = oem_vol_disp[col].apply(_fmt_vol)
+oem_vol_disp.index.name = "OEM"
+st.dataframe(oem_vol_disp, use_container_width=True)
 
-# Table B: OEM YoY Growth %
+# Section 7: OEM YoY Growth (expander)
 with st.expander("OEM YoY Growth %"):
-    yoy_data_tbl = pivot_vol.copy().astype(float)
-    row_labels = oem_order + ["TOTAL"]
-    yoy_result = pd.DataFrame(index=row_labels, columns=ordered_labels, dtype=object)
+    oem_yoy = _compute_yoy_table(
+        oem_pivot, oem_row_labels, ordered_labels, freq, incomplete_periods
+    )
+    oem_yoy.index.name = "OEM"
+    st.dataframe(oem_yoy, use_container_width=True)
 
-    for oem in row_labels:
-        for col_idx, col in enumerate(ordered_labels):
-            if col in incomplete_periods:
-                yoy_result.loc[oem, col] = "\u2014"
-                continue
-
-            curr = (
-                yoy_data_tbl.loc[oem, col]
-                if oem in yoy_data_tbl.index and col in yoy_data_tbl.columns
-                else None
-            )
-
-            if freq == "monthly" and col_idx >= 12:
-                prev_label = ordered_labels[col_idx - 12]
-            elif freq == "quarterly" and col_idx >= 4:
-                prev_label = ordered_labels[col_idx - 4]
-            elif freq == "annual" and col_idx >= 1:
-                prev_label = ordered_labels[col_idx - 1]
-            else:
-                prev_label = None
-
-            if prev_label and prev_label in incomplete_periods:
-                yoy_result.loc[oem, col] = "\u2014"
-                continue
-
-            if prev_label and prev_label in yoy_data_tbl.columns:
-                prev = yoy_data_tbl.loc[oem, prev_label]
-                if pd.notna(curr) and pd.notna(prev) and prev > 0:
-                    yoy_val = round(((curr / prev) - 1) * 100, 1)
-                    yoy_result.loc[oem, col] = f"{yoy_val:+.1f}%"
-                else:
-                    yoy_result.loc[oem, col] = "\u2014"
-            else:
-                yoy_result.loc[oem, col] = "\u2014"
-
-    yoy_result.index.name = "OEM"
-    st.dataframe(yoy_result, use_container_width=True)
-
-# Table C: OEM Market Share %
+# Section 8: OEM Market Share (expander)
 with st.expander("OEM Market Share %"):
-    share_display = pivot_vol.drop("TOTAL", errors="ignore").copy()
-    totals = pivot_vol.loc["TOTAL"] if "TOTAL" in pivot_vol.index else pivot_vol.sum(axis=0)
+    share_disp = oem_pivot.drop("TOTAL", errors="ignore").copy()
+    totals = oem_pivot.loc["TOTAL"] if "TOTAL" in oem_pivot.index else oem_pivot.sum(axis=0)
 
-    for col in share_display.columns:
+    for col in share_disp.columns:
         total = totals[col]
         if pd.notna(total) and total > 0:
-            share_display[col] = share_display[col].apply(
-                lambda v, t=total: f"{v / t * 100:.1f}%" if pd.notna(v) else "\u2014"
+            share_disp[col] = share_disp[col].apply(
+                lambda v, t=total: f"{v / t * 100:.1f}%" if pd.notna(v) and v > 0 else "\u2014"
             )
         else:
-            share_display[col] = "\u2014"
+            share_disp[col] = "\u2014"
 
-    share_display.index.name = "OEM"
-    st.dataframe(share_display, use_container_width=True)
-
-st.divider()
-
-
-# ====================
-# SECTION 5: OEM MARKET SHARE TREND (line chart)
-# ====================
-st.subheader(f"OEM Market Share Trend \u2014 {selected_cat}")
-
-share_frames = []
-for oem_name in top_oems[:7]:  # Limit to 7 for readability
-    oem_slice = filtered_oem[filtered_oem["oem_name"] == oem_name].copy()
-    if oem_slice.empty:
-        continue
-    oem_agg = aggregate_by_frequency(oem_slice, freq)
-    oem_agg["oem_name"] = oem_name
-    share_frames.append(oem_agg)
-
-if share_frames:
-    share_df = pd.concat(share_frames, ignore_index=True)
-    share_df["label"] = share_df.apply(lambda r: _period_lbl(r, freq), axis=1)
-
-    # Merge with category totals
-    cat_totals = cat_agg[["label", "volume"]].rename(columns={"volume": "cat_total"})
-    share_df = share_df.merge(cat_totals, on="label", how="left")
-    share_df["share_pct"] = (share_df["volume"] / share_df["cat_total"] * 100).round(1)
-
-    fig_share = go.Figure()
-    for idx, oem_name in enumerate(top_oems[:7]):
-        oem_d = share_df[share_df["oem_name"] == oem_name].sort_values("date")
-        if oem_d.empty:
-            continue
-        fig_share.add_trace(go.Scatter(
-            x=oem_d["label"], y=oem_d["share_pct"],
-            mode="lines+markers", name=oem_name,
-            line=dict(width=2, color=OEM_COLORS[idx % len(OEM_COLORS)]),
-        ))
-
-    fig_share.update_layout(
-        title=f"{selected_cat} Primary Sales \u2014 OEM Market Share (%)",
-        yaxis_title="Share %",
-        height=450,
-        legend=dict(orientation="h", yanchor="bottom", y=-0.3),
-    )
-    st.plotly_chart(fig_share, use_container_width=True)
+    share_disp.index.name = "OEM"
+    st.dataframe(share_disp, use_container_width=True)
