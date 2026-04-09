@@ -333,3 +333,52 @@ for col in mix_display.columns:
 
 mix_display.index.name = "Category"
 st.dataframe(mix_display, use_container_width=True)
+
+# ── Category Mix % Trend (line chart) ──
+st.markdown("**Category Mix % Trend**")
+
+import plotly.graph_objects as go
+mix_long = []
+for cat in cat_order:
+    for col in ordered_labels:
+        total = totals.get(col, 0)
+        if cat in pivot_no_total.index and col in pivot_no_total.columns:
+            val = pivot_no_total.loc[cat, col]
+            if total and total > 0 and pd.notna(val):
+                mix_long.append({
+                    "category": cat,
+                    "label": col,
+                    "share_pct": round(val / total * 100, 1),
+                })
+
+if mix_long:
+    mix_df = pd.DataFrame(mix_long)
+    mix_df["label"] = pd.Categorical(mix_df["label"], categories=ordered_labels, ordered=True)
+    mix_df = mix_df.sort_values("label")
+
+    category_colors_map = {
+        "PV": "#1f77b4", "2W": "#ff7f0e", "3W": "#2ca02c",
+        "CV": "#d62728", "TRACTORS": "#9467bd",
+    }
+
+    fig_mix = go.Figure()
+    for cat in cat_order:
+        d = mix_df[mix_df["category"] == cat]
+        if d.empty:
+            continue
+        fig_mix.add_trace(go.Scatter(
+            x=d["label"], y=d["share_pct"],
+            name=cat, mode="lines+markers",
+            line=dict(width=2.5, color=category_colors_map.get(cat, "#636EFA")),
+            marker=dict(size=6),
+            hovertemplate="%{y:.1f}%<extra>" + cat + "</extra>",
+        ))
+    fig_mix.update_layout(
+        height=420, title="Category Mix % over time",
+        yaxis=dict(title="Share %", ticksuffix="%"),
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=-0.25),
+        margin=dict(l=40, r=20, t=50, b=60),
+    )
+    fig_mix.update_xaxes(title="")
+    st.plotly_chart(fig_mix, width="stretch")

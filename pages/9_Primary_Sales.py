@@ -470,6 +470,44 @@ if not seg_monthly.empty:
                         mix_disp[col] = "\u2014"
                 mix_disp.index.name = "Segment"
                 st.dataframe(mix_disp, width="stretch")
+
+            # ── Segment Mix % 100% Stacked Column Chart ──
+            st.markdown("**Segment Mix % Trend**")
+
+            import plotly.graph_objects as go
+            import plotly.express as px
+
+            # Use leaf segments only (skip subtotal/bold rows)
+            leaf_rows = [r for r in seg_row_order if r not in bold_rows]
+            if leaf_rows:
+                pivot_leaf = seg_pivot.loc[leaf_rows].copy()
+
+                col_totals_leaf = pivot_leaf.sum(axis=0)
+                pct_pivot = pivot_leaf.div(col_totals_leaf.replace(0, 1), axis=1) * 100
+
+                palette = px.colors.qualitative.Pastel + px.colors.qualitative.Set3
+
+                fig_segmix = go.Figure()
+                for i, seg_name in enumerate(pct_pivot.index):
+                    display_name = seg_name.strip()  # Remove leading indent
+                    fig_segmix.add_trace(go.Bar(
+                        x=pct_pivot.columns,
+                        y=pct_pivot.loc[seg_name],
+                        name=display_name,
+                        marker_color=palette[i % len(palette)],
+                        hovertemplate="%{y:.1f}%<extra>" + display_name + "</extra>",
+                    ))
+                fig_segmix.update_layout(
+                    height=480,
+                    title=f"{selected_cat} Segment Mix % over time",
+                    barmode="stack",
+                    yaxis=dict(title="Share %", ticksuffix="%", range=[0, 100]),
+                    hovermode="x unified",
+                    legend=dict(orientation="h", yanchor="bottom", y=-0.35),
+                    margin=dict(l=40, r=20, t=50, b=100),
+                )
+                fig_segmix.update_xaxes(title="")
+                st.plotly_chart(fig_segmix, width="stretch")
         else:
             st.info("No segment data for the selected period.")
     else:
@@ -584,3 +622,57 @@ with st.expander("OEM Market Share %"):
 
     share_disp.index.name = "OEM"
     st.dataframe(share_disp, width="stretch")
+
+# ── OEM Market Share Line Chart ──
+st.markdown("**OEM Market Share Trend**")
+
+from components.charts import market_share_line_chart
+
+# pivot_oem has top N OEMs + Others + TOTAL rows
+oem_leaf = oem_pivot.drop("TOTAL", errors="ignore") if "TOTAL" in oem_pivot.index else oem_pivot
+
+# Take top 7 by total volume + Others aggregate
+oem_totals = oem_leaf.sum(axis=1).sort_values(ascending=False)
+top7_oems = oem_totals.head(7).index.tolist()
+
+# Build share long-form
+cat_totals_oem = oem_pivot.loc["TOTAL"] if "TOTAL" in oem_pivot.index else oem_pivot.sum(axis=0)
+
+share_long = []
+# Top 7 rows
+for oem_n in top7_oems:
+    for col in ordered_labels:
+        if col in oem_leaf.columns:
+            v = oem_leaf.loc[oem_n, col]
+            t = cat_totals_oem.get(col, 0)
+            if t > 0 and pd.notna(v):
+                share_long.append({
+                    "oem_name": oem_n,
+                    "label": col,
+                    "share_pct": round(v / t * 100, 1),
+                    "date_sort": ordered_labels.index(col),
+                })
+
+# Others = remaining OEMs aggregated
+other_oems = [o for o in oem_leaf.index if o not in top7_oems]
+if other_oems:
+    others_vol = oem_leaf.loc[other_oems].sum(axis=0)
+    for col in ordered_labels:
+        if col in others_vol.index:
+            v = others_vol[col]
+            t = cat_totals_oem.get(col, 0)
+            if t > 0:
+                share_long.append({
+                    "oem_name": "Others",
+                    "label": col,
+                    "share_pct": round(v / t * 100, 1),
+                    "date_sort": ordered_labels.index(col),
+                })
+
+if share_long:
+    share_df_oem = pd.DataFrame(share_long).sort_values("date_sort")
+    fig_oem_share = market_share_line_chart(
+        share_df_oem, title=f"{selected_cat} OEM Market Share",
+        date_col="date_sort",
+    )
+    st.plotly_chart(fig_oem_share, width="stretch")

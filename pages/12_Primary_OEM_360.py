@@ -335,6 +335,42 @@ share_row = pd.DataFrame([share_dict], index=["Market Share %"])
 share_row.index.name = ""
 st.dataframe(share_row, width="stretch")
 
+# -- Overall Market Share Line Chart --
+st.markdown("**Overall Market Share Trend**")
+
+import plotly.graph_objects as go
+
+# Build share data: OEM vol / category total per period
+share_trend_data = []
+for col in ordered_labels:
+    oem_v = vol_dict.get(col, 0)
+    cat_v = cat_vol_dict.get(col, 0)
+    if cat_v > 0:
+        share_trend_data.append({
+            "label": col,
+            "share_pct": round(oem_v / cat_v * 100, 1),
+        })
+
+if share_trend_data:
+    std_df = pd.DataFrame(share_trend_data)
+    fig_overall = go.Figure()
+    fig_overall.add_trace(go.Scatter(
+        x=std_df["label"], y=std_df["share_pct"],
+        name=selected_oem, mode="lines+markers",
+        line=dict(width=2.5, color="#1f77b4"),
+        marker=dict(size=6),
+        hovertemplate="%{y:.1f}%<extra>" + selected_oem + "</extra>",
+    ))
+    fig_overall.update_layout(
+        height=380,
+        title=f"{selected_oem} — Overall {selected_cat} Market Share",
+        yaxis=dict(title="Share %", ticksuffix="%"),
+        hovermode="x unified",
+        margin=dict(l=40, r=20, t=50, b=60),
+    )
+    fig_overall.update_xaxes(title="")
+    st.plotly_chart(fig_overall, width="stretch")
+
 st.divider()
 
 
@@ -463,6 +499,7 @@ if has_seg_data and not oem_seg_filtered.empty:
 
         # Compute share = OEM segment vol / category segment vol
         share_rows = {}
+        seg_share_numeric = {}  # parallel numeric version for charting
         # Use config order, only segments OEM participates in
         ordered_segs = [s for s in get_segment_order(selected_cat) if s in pivot_seg.index]
         remaining = [s for s in pivot_seg.index if s not in ordered_segs]
@@ -470,6 +507,7 @@ if has_seg_data and not oem_seg_filtered.empty:
 
         for seg in ordered_segs:
             row_vals = {}
+            num_vals = {}
             for col in ordered_labels:
                 oem_v = pivot_seg.loc[seg, col] if col in pivot_seg.columns else 0
                 tot_v = (
@@ -478,14 +516,48 @@ if has_seg_data and not oem_seg_filtered.empty:
                     else 0
                 )
                 if pd.notna(oem_v) and pd.notna(tot_v) and tot_v > 0:
-                    row_vals[col] = f"{oem_v / tot_v * 100:.1f}%"
+                    pct = oem_v / tot_v * 100
+                    row_vals[col] = f"{pct:.1f}%"
+                    num_vals[col] = pct
                 else:
                     row_vals[col] = "\u2014"
+                    num_vals[col] = np.nan
             share_rows[seg] = row_vals
+            seg_share_numeric[seg] = num_vals
 
         share_df = pd.DataFrame(share_rows).T.reindex(columns=ordered_labels)
         share_df.index.name = "Segment"
         st.dataframe(share_df, width="stretch")
+
+        # Numeric pivot for line chart
+        seg_share_pivot = pd.DataFrame(seg_share_numeric).T.reindex(columns=ordered_labels)
+
+        # -- Sub-Segment Market Share Line Chart --
+        st.markdown("**Sub-Segment Market Share Trend**")
+
+        from components.charts import market_share_line_chart
+
+        # Build long-form from seg_share_pivot (OEM's share in each sub-segment over time)
+        sub_share_long = []
+        for seg_name in seg_share_pivot.index:
+            for col in ordered_labels:
+                if col in seg_share_pivot.columns:
+                    v = seg_share_pivot.loc[seg_name, col]
+                    if pd.notna(v):
+                        sub_share_long.append({
+                            "oem_name": seg_name.strip(),  # Remove any indent
+                            "label": col,
+                            "share_pct": round(float(v), 1),
+                            "date_sort": ordered_labels.index(col),
+                        })
+
+        if sub_share_long:
+            ssl_df = pd.DataFrame(sub_share_long).sort_values("date_sort")
+            fig_subshare = market_share_line_chart(
+                ssl_df, title=f"{selected_oem} — Sub-Segment Market Share Trend",
+                date_col="date_sort",
+            )
+            st.plotly_chart(fig_subshare, width="stretch")
 
     st.divider()
 

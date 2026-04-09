@@ -449,3 +449,56 @@ with st.expander("OEM Market Share % (within sub-segment)"):
         st.dataframe(share_oem, width="stretch")
     else:
         st.info("Not enough data to compute shares.")
+
+# -- OEM Market Share Line Chart --
+st.markdown("**OEM Market Share Trend (within sub-segment)**")
+
+from components.charts import market_share_line_chart
+
+# pivot_oem has OEMs as rows (including TOTAL)
+oem_leaf_p11 = pivot_oem.drop("TOTAL", errors="ignore") if "TOTAL" in pivot_oem.index else pivot_oem
+
+# Top 7 + Others within this sub-segment
+oem_totals_p11 = oem_leaf_p11.sum(axis=1).sort_values(ascending=False)
+top7 = oem_totals_p11.head(7).index.tolist()
+
+# Totals per period
+period_totals = pivot_oem.loc["TOTAL"] if "TOTAL" in pivot_oem.index else pivot_oem.sum(axis=0)
+
+share_long_p11 = []
+for oem_n in top7:
+    for col in ordered_labels_oem:
+        if col in oem_leaf_p11.columns:
+            v = oem_leaf_p11.loc[oem_n, col]
+            t = period_totals.get(col, 0)
+            if t > 0 and pd.notna(v):
+                share_long_p11.append({
+                    "oem_name": oem_n,
+                    "label": col,
+                    "share_pct": round(v / t * 100, 1),
+                    "date_sort": ordered_labels_oem.index(col),
+                })
+
+# Others
+other_oems_p11 = [o for o in oem_leaf_p11.index if o not in top7]
+if other_oems_p11:
+    others_vol = oem_leaf_p11.loc[other_oems_p11].sum(axis=0)
+    for col in ordered_labels_oem:
+        if col in others_vol.index:
+            v = others_vol[col]
+            t = period_totals.get(col, 0)
+            if t > 0:
+                share_long_p11.append({
+                    "oem_name": "Others",
+                    "label": col,
+                    "share_pct": round(v / t * 100, 1),
+                    "date_sort": ordered_labels_oem.index(col),
+                })
+
+if share_long_p11:
+    sl_df = pd.DataFrame(share_long_p11).sort_values("date_sort")
+    fig_p11 = market_share_line_chart(
+        sl_df, title=f"{selected_segment} — OEM Market Share Trend",
+        date_col="date_sort",
+    )
+    st.plotly_chart(fig_p11, width="stretch")

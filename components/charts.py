@@ -144,6 +144,45 @@ def dual_axis_bar_line(df, x="date", bar_y="volume", line_y="yoy_pct",
     return fig
 
 
+def market_share_line_chart(share_df, x_col="label", y_col="share_pct",
+                             color_col="oem_name", title="", height=420,
+                             colors=None, date_col="date"):
+    """Line chart for market share over time.
+
+    Args:
+        share_df: DataFrame with x_col, y_col, color_col columns
+        colors: Optional list of colors (falls back to OEM_COLORS)
+        date_col: Column name for sorting (optional)
+
+    Returns plotly Figure.
+    """
+    from components.formatters import OEM_COLORS
+    palette = colors or OEM_COLORS
+
+    fig = go.Figure()
+    groups = share_df[color_col].unique().tolist()
+    for i, grp in enumerate(groups):
+        d = share_df[share_df[color_col] == grp]
+        if date_col in d.columns:
+            d = d.sort_values(date_col)
+        fig.add_trace(go.Scatter(
+            x=d[x_col], y=d[y_col],
+            name=str(grp), mode="lines+markers",
+            line=dict(width=2, color=palette[i % len(palette)]),
+            marker=dict(size=5),
+            hovertemplate="%{y:.1f}%<extra>" + str(grp) + "</extra>",
+        ))
+    layout_kwargs = {k: v for k, v in LAYOUT_DEFAULTS.items() if k != "legend"}
+    fig.update_layout(
+        **layout_kwargs, height=height, title=title,
+        yaxis=dict(title="Share %", ticksuffix="%"),
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=-0.3),
+    )
+    fig.update_xaxes(title="")
+    return fig
+
+
 def yoy_bar_chart(df, title="YoY Growth", height=350):
     """Bar chart showing YoY growth rates with color coding."""
     fig = go.Figure()

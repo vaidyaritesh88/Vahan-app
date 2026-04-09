@@ -344,11 +344,64 @@ if agg_frames:
         pen_display.index.name = "Subsegment"
         st.dataframe(pen_display, use_container_width=True)
 
+    # ── Subsegment Share % Trend (line chart) ──
+    st.markdown("**Subsegment Share % Trend**")
+
+    import plotly.graph_objects as go
+    share_long = []
+    # pivot_vol has subsegments (ICE, EV, CNG, Hybrid) as rows and TOTAL row at bottom
+    pivot_no_total = pivot_vol.drop("TOTAL", errors="ignore") if "TOTAL" in pivot_vol.index else pivot_vol
+    totals = pivot_vol.loc["TOTAL"] if "TOTAL" in pivot_vol.index else pivot_vol.sum(axis=0)
+
+    for st_type in pivot_no_total.index:
+        for col in ordered_labels:
+            if col in pivot_no_total.columns:
+                val = pivot_no_total.loc[st_type, col]
+                total = totals[col] if col in totals.index else 0
+                if total > 0 and pd.notna(val):
+                    share_long.append({
+                        "sub_type": st_type,
+                        "label": col,
+                        "share_pct": round(val / total * 100, 1),
+                    })
+
+    if share_long:
+        share_df = pd.DataFrame(share_long)
+        share_df["label"] = pd.Categorical(share_df["label"], categories=ordered_labels, ordered=True)
+        share_df = share_df.sort_values("label")
+
+        fig_share = go.Figure()
+        for st_type in pivot_no_total.index:
+            d = share_df[share_df["sub_type"] == st_type]
+            if d.empty:
+                continue
+            color = SUB_COLORS.get(st_type, "#636EFA")
+            fig_share.add_trace(go.Scatter(
+                x=d["label"], y=d["share_pct"],
+                name=st_type, mode="lines+markers",
+                line=dict(width=2.5, color=color),
+                marker=dict(size=6),
+                hovertemplate="%{y:.1f}%<extra>" + str(st_type) + "</extra>",
+            ))
+        fig_share.update_layout(
+            height=420, title="Subsegment Share % over time",
+            yaxis=dict(title="Share %", ticksuffix="%"),
+            hovermode="x unified",
+            legend=dict(orientation="h", yanchor="bottom", y=-0.25),
+            margin=dict(l=40, r=20, t=50, b=60),
+        )
+        fig_share.update_xaxes(title="")
+        st.plotly_chart(fig_share, width="stretch")
+
 st.divider()
 
 
-# SECTION 6: TOP OEMs PER SUBSEGMENT
-st.subheader("Top OEMs per Subsegment")
+# ═══════════════════════════════════════
+# SECTION 6: OEM Analysis per Subsegment
+# ═══════════════════════════════════════
+st.subheader("OEM Analysis per Subsegment")
+
+from components.charts import market_share_line_chart
 
 for sub_code, sub_label in sub_codes.items():
     oem_sub = get_all_oem_subsegment_monthly(sub_code)
@@ -362,26 +415,94 @@ for sub_code, sub_label in sub_codes.items():
     if oem_sub_filtered.empty:
         continue
 
-    # Aggregate over the period
-    oem_totals = oem_sub_filtered.groupby("oem_name").agg(
-        volume=("volume", "sum")
-    ).reset_index().sort_values("volume", ascending=False)
+    cat_name_display = CATEGORY_CONFIG.get(sub_code, {}).get("name", sub_code)
 
-    top_10 = oem_totals.head(10)
-    total_vol = oem_totals["volume"].sum()
-    top_10["share_pct"] = (top_10["volume"] / total_vol * 100).round(1) if total_vol > 0 else 0
-    top_10["label"] = top_10.apply(
-        lambda r: f"{int(r['volume']):,} ({r['share_pct']:.1f}%)", axis=1
-    )
+    with st.expander(f"{cat_name_display} ({sub_label}) \u2014 OEM breakdown", expanded=False):
+        # Identify top 7 OEMs by total volume over the period
+        top7 = (oem_sub_filtered.groupby("oem_name")["volume"]
+                .sum().nlargest(7).index.tolist())
 
-    cat_name = CATEGORY_CONFIG.get(sub_code, {}).get("name", sub_code)
-    with st.expander(f"{cat_name} ({sub_label}) \u2014 Top OEMs"):
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            fig = horizontal_bar(top_10, x="volume", y="oem_name",
-                                 title=f"Top OEMs \u2014 {cat_name}", text="label")
-            st.plotly_chart(fig, use_container_width=True)
-        with col2:
-            st.markdown(f"**Total Volume:** {int(total_vol):,}")
-            st.markdown(f"**OEMs with data:** {len(oem_totals)}")
-            st.markdown(f"**Top 10 share:** {top_10['share_pct'].sum():.1f}%")
+        # Mark Others
+        oem_sub_filtered["oem_display"] = oem_sub_filtered["oem_name"].apply(
+            lambda x: x if x in top7 else "Others"
+        )
+
+        # Aggregate by frequency
+        agg_frames = []
+        for oem_d, grp in oem_sub_filtered.groupby("oem_display"):
+            agg_d = aggregate_by_frequency(grp, freq)
+            agg_d["oem_display"] = oem_d
+            agg_frames.append(agg_d)
+
+        if not agg_frames:
+            continue
+
+        oem_agg = pd.concat(agg_frames, ignore_index=True)
+        oem_agg["label"] = oem_agg.apply(
+            lambda r: r["period_label"] if "period_label" in r.index and freq != "monthly" else format_month(int(r["year"]), int(r["month"])),
+            axis=1,
+        )
+
+        # Pivot: OEM -> periods
+        pv_oem = oem_agg.pivot_table(
+            index="oem_display", columns="label", values="volume", aggfunc="sum"
+        )
+        labels_ord = oem_agg.sort_values("date")["label"].unique().tolist()
+        pv_oem = pv_oem.reindex(columns=labels_ord).fillna(0)
+
+        # Sort: top 7 by total desc, then Others
+        sort_key = pv_oem.sum(axis=1).sort_values(ascending=False)
+        # Reorder: top 7 by rank, Others last
+        ordered_idx = [o for o in sort_key.index if o != "Others"] + (["Others"] if "Others" in pv_oem.index else [])
+        pv_oem = pv_oem.reindex(ordered_idx)
+
+        # TOTAL row
+        tot = pv_oem.sum(axis=0)
+        tot.name = "TOTAL"
+        pv_full = pd.concat([pv_oem, tot.to_frame().T])
+
+        # ── Volume table ──
+        st.markdown("**Volume (units)**")
+        vol_disp = pv_full.copy()
+        for c in vol_disp.columns:
+            vol_disp[c] = vol_disp[c].apply(
+                lambda v: f"{int(v):,}" if pd.notna(v) and v > 0 else "\u2014"
+            )
+        vol_disp.index.name = "OEM"
+        st.dataframe(vol_disp, width="stretch")
+
+        # ── Share % table ──
+        st.markdown("**Market Share % (within subsegment)**")
+        share_disp = pv_oem.copy()
+        tot_row = pv_full.loc["TOTAL"]
+        for c in share_disp.columns:
+            t = tot_row[c]
+            if pd.notna(t) and t > 0:
+                share_disp[c] = share_disp[c].apply(
+                    lambda v, tt=t: f"{v / tt * 100:.1f}%" if pd.notna(v) and v > 0 else "\u2014"
+                )
+            else:
+                share_disp[c] = "\u2014"
+        share_disp.index.name = "OEM"
+        st.dataframe(share_disp, width="stretch")
+
+        # ── Market share line chart ──
+        share_long = []
+        for oem_d in pv_oem.index:
+            for lbl in labels_ord:
+                v = pv_oem.loc[oem_d, lbl]
+                t = tot_row[lbl]
+                if t > 0 and pd.notna(v):
+                    share_long.append({
+                        "oem_name": oem_d,
+                        "label": lbl,
+                        "share_pct": round(v / t * 100, 1),
+                        "date": oem_agg[oem_agg["label"] == lbl]["date"].iloc[0],
+                    })
+
+        if share_long:
+            sl_df = pd.DataFrame(share_long)
+            fig_share = market_share_line_chart(
+                sl_df, title=f"{cat_name_display} \u2014 OEM Market Share Trend"
+            )
+            st.plotly_chart(fig_share, width="stretch")
