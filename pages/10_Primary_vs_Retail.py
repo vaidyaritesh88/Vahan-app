@@ -1,8 +1,8 @@
-"""Page 10: Primary vs Retail - Compare wholesale/dispatch vs Vahan registration volumes.
+"""Page 10: Primary vs Retail - Compare wholesale/dispatch vs Vahan registration YoY growth.
 
-Detects inventory buildup at dealers by comparing primary (wholesale) sales
-against retail (Vahan registration) data. Positive delta = inventory buildup,
-negative delta = destocking.
+Retail data is missing Telangana and Odisha, so absolute volume comparison is invalid.
+Instead we compare YoY growth rates and a rebased volume index to detect
+inventory buildup / destocking at dealers.
 """
 import streamlit as st
 import pandas as pd
@@ -16,20 +16,17 @@ from database.schema import init_db
 from database.queries import (
     get_primary_category_monthly, get_primary_oem_monthly,
     get_all_categories_monthly_from_vehcat, get_category_oem_monthly_from_vehcat,
-    has_primary_data, get_last_scrape_info,
+    has_primary_data, get_primary_available_months,
 )
 from components.filters import primary_period_selector
-from components.formatters import format_units, format_month, format_pct, OEM_COLORS
-from components.charts import dual_axis_bar_line
+from components.formatters import format_month, OEM_COLORS
 from components.analysis import (
     aggregate_by_frequency, filter_by_period, get_period_months, add_fy_columns,
 )
 
 init_db()
 
-st.set_page_config(page_title="Primary vs Retail", page_icon="\u2696\ufe0f", layout="wide")
-
-# CSS for right-aligned tables
+# ── CSS ──
 st.markdown("""
 <style>
 div[data-testid="stDataFrame"] td { text-align: right !important; }
@@ -38,14 +35,18 @@ div[data-testid="stDataFrame"] table { font-size: 0.85rem; }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("\u2696\ufe0f Primary vs Retail")
+st.title("Primary vs Retail")
 
+# ── Helpers ──────────────────────────────────────────────────────────────────
 
-# ── Helpers ──
-def _fmt_vol(val):
-    if pd.isna(val) or val is None:
-        return "\u2014"
-    return f"{int(val):,}"
+KEY_PV_OEMS = [
+    "Maruti Suzuki", "Hyundai", "Tata Motors", "Mahindra", "Toyota",
+    "Kia", "Honda Cars", "MG Motor", "Skoda VW",
+]
+KEY_2W_OEMS = [
+    "Hero MotoCorp", "Honda 2W", "TVS Motor", "Bajaj Auto",
+    "Royal Enfield", "Yamaha", "Suzuki 2W", "Ola Electric", "Ather Energy",
+]
 
 
 def _fmt_growth(val):
@@ -54,10 +55,17 @@ def _fmt_growth(val):
     return f"{val:+.1f}%"
 
 
-def _fmt_delta_pct(val):
+def _fmt_index(val):
     if val is None or pd.isna(val):
         return "\u2014"
-    return f"{val:+.1f}%"
+    return f"{val:.1f}"
+
+
+def _fmt_gap_pp(val):
+    """Format gap in percentage-points with color hint."""
+    if val is None or pd.isna(val):
+        return "\u2014"
+    return f"{val:+.1f} pp"
 
 
 def _period_lbl(row, freq):
@@ -80,7 +88,6 @@ def _get_incomplete_periods(raw_data, freq):
 
 
 def _ensure_date(df):
-    """Add a date column if missing."""
     if "date" not in df.columns:
         df["date"] = pd.to_datetime(
             df["year"].astype(str) + "-" + df["month"].astype(str).str.zfill(2) + "-01"
@@ -88,46 +95,43 @@ def _ensure_date(df):
     return df
 
 
-def _aggregate_comparison(primary_df, retail_df, freq):
-    """Aggregate primary and retail data by frequency, then merge.
+def _compute_yoy(agg, vol_col="volume", freq="monthly"):
+    """Add yoy_pct column to an aggregated DataFrame.
 
-    Returns a merged DataFrame with columns:
-      period_label, date, primary_vol, retail_vol, delta, delta_pct
+    For monthly: shift 12.  For quarterly/annual: shift 4 / 1 within sorted order.
     """
-    # Aggregate primary
-    if not primary_df.empty:
-        p_agg = aggregate_by_frequency(primary_df.copy(), freq, vol_col="volume")
-        p_agg["label"] = p_agg.apply(lambda r: _period_lbl(r, freq), axis=1)
-        p_agg = p_agg[["label", "date", "volume"]].rename(columns={"volume": "primary_vol"})
+    agg = agg.sort_values("date").reset_index(drop=True)
+    if freq == "monthly":
+        shift = 12
+    elif freq == "quarterly":
+        shift = 4
     else:
-        p_agg = pd.DataFrame(columns=["label", "date", "primary_vol"])
-
-    # Aggregate retail
-    if not retail_df.empty:
-        r_agg = aggregate_by_frequency(retail_df.copy(), freq, vol_col="volume")
-        r_agg["label"] = r_agg.apply(lambda r: _period_lbl(r, freq), axis=1)
-        r_agg = r_agg[["label", "date", "volume"]].rename(columns={"volume": "retail_vol"})
-    else:
-        r_agg = pd.DataFrame(columns=["label", "date", "retail_vol"])
-
-    if p_agg.empty and r_agg.empty:
-        return pd.DataFrame()
-
-    merged = pd.merge(p_agg, r_agg, on=["label", "date"], how="outer").sort_values("date")
-    merged["delta"] = merged["primary_vol"] - merged["retail_vol"]
-    merged["delta_pct"] = np.where(
-        merged["retail_vol"] > 0,
-        ((merged["primary_vol"] - merged["retail_vol"]) / merged["retail_vol"] * 100).round(1),
+        shift = 1
+    agg["prev"] = agg[vol_col].shift(shift)
+    agg["yoy_pct"] = np.where(
+        agg["prev"] > 0,
+        ((agg[vol_col] - agg["prev"]) / agg["prev"] * 100).round(1),
         np.nan,
     )
-    return merged
+    agg.drop(columns=["prev"], inplace=True)
+    return agg
 
 
-# ══════════════════════════════════════════════
+def _rebase_index(agg, base_label, vol_col="volume"):
+    """Rebase volume to 100 at *base_label* period."""
+    match = agg.loc[agg["label"] == base_label, vol_col]
+    if match.empty or match.iloc[0] in (0, np.nan, None):
+        agg["index"] = np.nan
+        return agg
+    base_val = match.iloc[0]
+    agg["index"] = (agg[vol_col] / base_val * 100).round(1)
+    return agg
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # SIDEBAR
-# ══════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 CATEGORIES = ["PV", "2W"]
-
 selected_cat = st.sidebar.selectbox("Category", CATEGORIES, key="pri_cat")
 
 preset, ref_year, ref_month = primary_period_selector(key="pri_period")
@@ -139,30 +143,34 @@ FREQ_MAP = {"Monthly": "monthly", "Quarterly": "quarterly", "Financial Year": "a
 freq_label = st.sidebar.selectbox("Frequency", list(FREQ_MAP.keys()), key="pri_freq")
 freq = FREQ_MAP[freq_label]
 
-# OEM selector
-if has_primary_data(selected_cat):
-    primary_oem_raw = get_primary_oem_monthly(selected_cat)
-    oem_list = sorted(primary_oem_raw["oem_name"].unique().tolist())
+# ── Base Month for Index ──
+avail_months = get_primary_available_months()  # descending
+if avail_months:
+    base_options = [format_month(y, m) for y, m in avail_months]
+    # Default: Apr two FYs ago  (e.g. Apr 2024 if today is FY26)
+    from datetime import date as _date
+    _today = _date.today()
+    _default_fy_start = _today.year - 2 if _today.month >= 4 else _today.year - 3
+    _default_base = format_month(_default_fy_start, 4)
+    _def_idx = base_options.index(_default_base) if _default_base in base_options else 0
+    base_month_lbl = st.sidebar.selectbox(
+        "Base Month (Index=100)", base_options,
+        index=_def_idx if "pvr_base" not in st.session_state else None,
+        key="pvr_base",
+    )
 else:
-    oem_list = []
+    base_month_lbl = None
 
-oem_options = ["All OEMs"] + oem_list
+# ── OEM selector ──
+oem_choices = KEY_PV_OEMS if selected_cat == "PV" else KEY_2W_OEMS
+oem_options = ["All OEMs (Category Level)"] + oem_choices
 selected_oem = st.sidebar.selectbox("OEM", oem_options, key="pvr_oem")
 
 st.sidebar.divider()
 
-_scrape_info = get_last_scrape_info()
-if _scrape_info:
-    with st.sidebar.expander("\U0001f504 Last Scraped", expanded=False):
-        for si in _scrape_info:
-            stype = si["scrape_type"].replace("national_", "N:").replace("state_", "S:")
-            ts = si["last_completed"][:16] if si["last_completed"] else "Never"
-            st.caption(f"**{stype}** \u2014 {ts}")
-
-
-# ══════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 # LOAD DATA
-# ══════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 if not has_primary_data(selected_cat):
     st.warning(
         f"No primary (wholesale) data available for **{selected_cat}**.\n\n"
@@ -170,233 +178,200 @@ if not has_primary_data(selected_cat):
     )
     st.stop()
 
-# Category-level data
-primary_cat = get_primary_category_monthly(selected_cat)
-primary_cat = _ensure_date(primary_cat)
+# Load full (unfiltered) data for YoY computation — we need prior-year rows
+is_oem = selected_oem != "All OEMs (Category Level)"
 
-retail_all = get_all_categories_monthly_from_vehcat()
-retail_cat = retail_all[retail_all["category_code"] == selected_cat].copy()
-retail_cat = _ensure_date(retail_cat)
+if is_oem:
+    pri_raw = get_primary_oem_monthly(selected_cat)
+    pri_raw = _ensure_date(pri_raw)
+    pri_raw = pri_raw[pri_raw["oem_name"] == selected_oem].copy()
+    ret_raw = get_category_oem_monthly_from_vehcat(selected_cat)
+    ret_raw = _ensure_date(ret_raw)
+    ret_raw = ret_raw[ret_raw["oem_name"] == selected_oem].copy()
+else:
+    pri_raw = get_primary_category_monthly(selected_cat)
+    pri_raw = _ensure_date(pri_raw)
+    ret_raw = get_all_categories_monthly_from_vehcat()
+    ret_raw = _ensure_date(ret_raw)
+    ret_raw = ret_raw[ret_raw["category_code"] == selected_cat].copy()
 
-if retail_cat.empty:
+if pri_raw.empty:
+    st.warning(f"No primary data for the selection.")
+    st.stop()
+if ret_raw.empty:
     st.warning(f"No retail (Vahan) data for **{selected_cat}**. Run the Vahan scraper first.")
     st.stop()
 
-# Apply period filter
-start_date, end_date = get_period_months(preset, ref_year, ref_month)
-primary_cat_f = filter_by_period(primary_cat, start_date, end_date)
-retail_cat_f = filter_by_period(retail_cat, start_date, end_date)
+# Aggregate
+pri_agg = aggregate_by_frequency(pri_raw.copy(), freq, vol_col="volume")
+ret_agg = aggregate_by_frequency(ret_raw.copy(), freq, vol_col="volume")
 
-if primary_cat_f.empty and retail_cat_f.empty:
-    st.info("No data for the selected period.")
+pri_agg["label"] = pri_agg.apply(lambda r: _period_lbl(r, freq), axis=1)
+ret_agg["label"] = ret_agg.apply(lambda r: _period_lbl(r, freq), axis=1)
+
+# Incomplete periods
+inc_pri = _get_incomplete_periods(pri_raw, freq)
+inc_ret = _get_incomplete_periods(ret_raw, freq)
+
+# YoY
+pri_agg = _compute_yoy(pri_agg, "volume", freq)
+ret_agg = _compute_yoy(ret_agg, "volume", freq)
+
+# Suppress YoY for incomplete periods
+for inc_set, agg_df in [(inc_pri, pri_agg), (inc_ret, ret_agg)]:
+    if inc_set:
+        agg_df.loc[agg_df["label"].isin(inc_set), "yoy_pct"] = np.nan
+
+# Now apply period filter to the aggregated data
+start_date, end_date = get_period_months(preset, ref_year, ref_month)
+pri_f = pri_agg[(pri_agg["date"] >= start_date) & (pri_agg["date"] <= end_date)].copy()
+ret_f = ret_agg[(ret_agg["date"] >= start_date) & (ret_agg["date"] <= end_date)].copy()
+
+# Merge on label
+merged = pd.merge(
+    pri_f[["label", "date", "volume", "yoy_pct"]].rename(
+        columns={"volume": "pri_vol", "yoy_pct": "pri_yoy"}
+    ),
+    ret_f[["label", "date", "volume", "yoy_pct"]].rename(
+        columns={"volume": "ret_vol", "yoy_pct": "ret_yoy"}
+    ),
+    on=["label", "date"], how="outer",
+).sort_values("date").reset_index(drop=True)
+
+merged["gap_pp"] = (merged["pri_yoy"] - merged["ret_yoy"]).round(1)
+
+if merged.empty:
+    st.info("No overlapping data for the selected period.")
     st.stop()
 
-# OEM-level data (load once, filter later)
-primary_oem_all = get_primary_oem_monthly(selected_cat)
-primary_oem_all = _ensure_date(primary_oem_all)
+entity_label = selected_oem if is_oem else selected_cat
 
-retail_oem_all = get_category_oem_monthly_from_vehcat(selected_cat)
-retail_oem_all = _ensure_date(retail_oem_all)
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 1: YoY Growth Comparison
+# ══════════════════════════════════════════════════════════════════════════════
+st.subheader(f"1. YoY Growth Comparison \u2014 {entity_label}")
+st.caption(
+    "Retail data excludes Telangana & Odisha, so absolute volumes are not comparable. "
+    "YoY growth rates are comparable because the same states are missing in both years."
+)
 
-primary_oem_f = filter_by_period(primary_oem_all, start_date, end_date)
-retail_oem_f = filter_by_period(retail_oem_all, start_date, end_date)
+# ── Transposed table: rows = metrics, columns = periods ──
+periods = merged["label"].tolist()
+tbl_data = {
+    "Primary YoY %": [_fmt_growth(v) for v in merged["pri_yoy"]],
+    "Retail YoY %": [_fmt_growth(v) for v in merged["ret_yoy"]],
+    "Gap (pp)": [_fmt_gap_pp(v) for v in merged["gap_pp"]],
+}
+tbl_df = pd.DataFrame(tbl_data, index=periods).T
+tbl_df.index.name = "Metric"
+st.dataframe(tbl_df, width="stretch")
+st.caption(
+    "**Gap** = Primary YoY - Retail YoY. "
+    "Positive (red) = primary growing faster (inventory building). "
+    "Negative (green) = retail growing faster (destocking)."
+)
 
-
-# ══════════════════════════════════════════════
-# SECTION 1: Category-Level Comparison
-# ══════════════════════════════════════════════
-st.subheader(f"Section 1: {selected_cat} \u2014 Primary vs Retail")
-
-comp = _aggregate_comparison(primary_cat_f, retail_cat_f, freq)
-
-if not comp.empty:
-    # Grouped bar chart
-    fig = go.Figure()
-    fig.add_trace(go.Bar(
-        x=comp["label"], y=comp["primary_vol"],
-        name="Primary (Wholesale)",
-        marker_color="#636EFA",
-    ))
-    fig.add_trace(go.Bar(
-        x=comp["label"], y=comp["retail_vol"],
-        name="Retail (Vahan)",
-        marker_color="#00CC96",
-    ))
-    fig.update_layout(
-        barmode="group",
-        title=f"{selected_cat} \u2014 Primary vs Retail Volumes",
-        xaxis_title="Period",
-        yaxis_title="Volume",
-        height=480,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-    # Data table
-    tbl = comp[["label", "primary_vol", "retail_vol", "delta", "delta_pct"]].copy()
-    tbl.columns = ["Period", "Primary Vol", "Retail Vol", "Delta (units)", "Delta %"]
-    tbl["Primary Vol"] = tbl["Primary Vol"].apply(_fmt_vol)
-    tbl["Retail Vol"] = tbl["Retail Vol"].apply(_fmt_vol)
-    tbl["Delta (units)"] = tbl["Delta (units)"].apply(
-        lambda v: f"{int(v):+,}" if pd.notna(v) else "\u2014"
-    )
-    tbl["Delta %"] = tbl["Delta %"].apply(_fmt_delta_pct)
-    tbl = tbl.set_index("Period")
-    st.dataframe(tbl, use_container_width=True)
-
-    st.caption(
-        "**Delta** = Primary - Retail. "
-        "Positive = inventory buildup at dealers. "
-        "Negative = destocking (retail exceeds wholesale)."
-    )
-else:
-    st.info("Not enough overlapping data to compare Primary vs Retail.")
+# ── Chart ──
+fig1 = go.Figure()
+fig1.add_trace(go.Scatter(
+    x=merged["label"], y=merged["pri_yoy"],
+    name="Primary YoY %", mode="lines+markers",
+    line=dict(color="#636EFA", width=2.5),
+    marker=dict(size=6),
+))
+fig1.add_trace(go.Scatter(
+    x=merged["label"], y=merged["ret_yoy"],
+    name="Retail YoY %", mode="lines+markers",
+    line=dict(color="#00CC96", width=2.5),
+    marker=dict(size=6),
+))
+fig1.add_hline(y=0, line_dash="dash", line_color="grey", line_width=1)
+fig1.update_layout(
+    title=f"{entity_label} \u2014 YoY Growth: Primary vs Retail",
+    yaxis_title="YoY Growth %",
+    xaxis_title="Period",
+    height=460,
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+)
+st.plotly_chart(fig1, use_container_width=True)
 
 st.divider()
 
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION 2: Rebased Volume Index
+# ══════════════════════════════════════════════════════════════════════════════
+st.subheader(f"2. Rebased Volume Index \u2014 {entity_label}")
 
-# ══════════════════════════════════════════════
-# SECTION 2: OEM-Level Comparison (specific OEM)
-# ══════════════════════════════════════════════
-if selected_oem != "All OEMs":
-    st.subheader(f"Section 2: {selected_oem} \u2014 Primary vs Retail")
-
-    p_oem = primary_oem_f[primary_oem_f["oem_name"] == selected_oem].copy()
-    r_oem = retail_oem_f[retail_oem_f["oem_name"] == selected_oem].copy()
-
-    if p_oem.empty and r_oem.empty:
-        st.info(f"No data for {selected_oem} in the selected period.")
-    else:
-        oem_comp = _aggregate_comparison(p_oem, r_oem, freq)
-
-        if not oem_comp.empty:
-            # Grouped bar chart
-            fig2 = go.Figure()
-            fig2.add_trace(go.Bar(
-                x=oem_comp["label"], y=oem_comp["primary_vol"],
-                name="Primary (Wholesale)",
-                marker_color="#636EFA",
-            ))
-            fig2.add_trace(go.Bar(
-                x=oem_comp["label"], y=oem_comp["retail_vol"],
-                name="Retail (Vahan)",
-                marker_color="#00CC96",
-            ))
-            fig2.update_layout(
-                barmode="group",
-                title=f"{selected_oem} \u2014 Primary vs Retail Volumes",
-                xaxis_title="Period",
-                yaxis_title="Volume",
-                height=480,
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-            )
-            st.plotly_chart(fig2, use_container_width=True)
-
-            # Data table
-            tbl2 = oem_comp[["label", "primary_vol", "retail_vol", "delta", "delta_pct"]].copy()
-            tbl2.columns = ["Period", "Primary Vol", "Retail Vol", "Delta (units)", "Delta %"]
-            tbl2["Primary Vol"] = tbl2["Primary Vol"].apply(_fmt_vol)
-            tbl2["Retail Vol"] = tbl2["Retail Vol"].apply(_fmt_vol)
-            tbl2["Delta (units)"] = tbl2["Delta (units)"].apply(
-                lambda v: f"{int(v):+,}" if pd.notna(v) else "\u2014"
-            )
-            tbl2["Delta %"] = tbl2["Delta %"].apply(_fmt_delta_pct)
-            tbl2 = tbl2.set_index("Period")
-            st.dataframe(tbl2, use_container_width=True)
-        else:
-            st.info(f"Not enough overlapping data for {selected_oem}.")
-
-    st.divider()
-
-
-# ══════════════════════════════════════════════
-# SECTION 3: OEM Inventory Delta Table
-# ══════════════════════════════════════════════
-st.subheader("Section 3: OEM Inventory Delta Table")
-st.caption("Delta % = (Primary - Retail) / Retail * 100. Top 10 OEMs by total primary volume.")
-
-# Get last 6 periods from category-level comparison for column headers
-if comp.empty:
-    st.info("No comparison data available for the delta table.")
+if base_month_lbl is None:
+    st.info("No base month available for index calculation.")
     st.stop()
 
-last_periods = comp["label"].tolist()
-if len(last_periods) > 6:
-    last_periods = last_periods[-6:]
-
-# Build OEM-level monthly merge
-oem_merged = pd.merge(
-    primary_oem_f.rename(columns={"volume": "primary_vol"}),
-    retail_oem_f.rename(columns={"volume": "retail_vol"}),
-    on=["year", "month", "oem_name", "date"],
-    how="outer",
+st.markdown(
+    f"Both series rebased to **100** at **{base_month_lbl}**. "
+    "Divergence indicates cumulative inventory buildup or destocking."
 )
 
-if oem_merged.empty:
-    st.info("No OEM-level overlapping data for the delta table.")
+# Build full (unfiltered) merged for index — need from base month onward
+pri_full = pri_agg[["label", "date", "volume"]].rename(columns={"volume": "pri_vol"})
+ret_full = ret_agg[["label", "date", "volume"]].rename(columns={"volume": "ret_vol"})
+idx_merged = pd.merge(pri_full, ret_full, on=["label", "date"], how="outer").sort_values("date")
+
+idx_merged = _rebase_index(idx_merged, base_month_lbl, vol_col="pri_vol")
+idx_merged = idx_merged.rename(columns={"index": "pri_idx"})
+idx_merged = _rebase_index(idx_merged, base_month_lbl, vol_col="ret_vol")
+idx_merged = idx_merged.rename(columns={"index": "ret_idx"})
+idx_merged["idx_gap"] = (idx_merged["pri_idx"] - idx_merged["ret_idx"]).round(1)
+
+# Filter: from base month onward, within period
+base_row = idx_merged.loc[idx_merged["label"] == base_month_lbl]
+if not base_row.empty:
+    base_date = base_row["date"].iloc[0]
+    idx_show = idx_merged[
+        (idx_merged["date"] >= base_date)
+        & (idx_merged["date"] >= start_date)
+        & (idx_merged["date"] <= end_date)
+    ].copy()
+else:
+    # base month outside selected range — show what we can
+    idx_show = idx_merged[
+        (idx_merged["date"] >= start_date) & (idx_merged["date"] <= end_date)
+    ].copy()
+
+if idx_show.empty:
+    st.info("Base month is outside the selected period range. Adjust the base month or period.")
     st.stop()
 
-# Aggregate by frequency per OEM
-oem_frames = []
-for oem in oem_merged["oem_name"].unique():
-    oem_slice = oem_merged[oem_merged["oem_name"] == oem].copy()
-
-    # Build separate primary and retail slices for aggregation
-    p_slice = oem_slice[["year", "month", "date", "primary_vol"]].dropna(subset=["primary_vol"]).copy()
-    p_slice = p_slice.rename(columns={"primary_vol": "volume"})
-    r_slice = oem_slice[["year", "month", "date", "retail_vol"]].dropna(subset=["retail_vol"]).copy()
-    r_slice = r_slice.rename(columns={"retail_vol": "volume"})
-
-    if not p_slice.empty:
-        p_agg = aggregate_by_frequency(p_slice, freq, vol_col="volume")
-        p_agg["label"] = p_agg.apply(lambda r: _period_lbl(r, freq), axis=1)
-        p_agg = p_agg[["label", "volume"]].rename(columns={"volume": "primary_vol"})
-    else:
-        p_agg = pd.DataFrame(columns=["label", "primary_vol"])
-
-    if not r_slice.empty:
-        r_agg = aggregate_by_frequency(r_slice, freq, vol_col="volume")
-        r_agg["label"] = r_agg.apply(lambda r: _period_lbl(r, freq), axis=1)
-        r_agg = r_agg[["label", "volume"]].rename(columns={"volume": "retail_vol"})
-    else:
-        r_agg = pd.DataFrame(columns=["label", "retail_vol"])
-
-    m = pd.merge(p_agg, r_agg, on="label", how="outer")
-    m["oem_name"] = oem
-    oem_frames.append(m)
-
-if not oem_frames:
-    st.info("No OEM-level data to build delta table.")
-    st.stop()
-
-oem_agg = pd.concat(oem_frames, ignore_index=True)
-
-# Compute delta %
-oem_agg["delta_pct"] = np.where(
-    oem_agg["retail_vol"] > 0,
-    ((oem_agg["primary_vol"] - oem_agg["retail_vol"]) / oem_agg["retail_vol"] * 100).round(1),
-    np.nan,
+# ── Chart ──
+fig2 = go.Figure()
+fig2.add_trace(go.Scatter(
+    x=idx_show["label"], y=idx_show["pri_idx"],
+    name="Primary Index", mode="lines+markers",
+    line=dict(color="#636EFA", width=2.5),
+    marker=dict(size=6),
+))
+fig2.add_trace(go.Scatter(
+    x=idx_show["label"], y=idx_show["ret_idx"],
+    name="Retail Index", mode="lines+markers",
+    line=dict(color="#00CC96", width=2.5),
+    marker=dict(size=6),
+))
+fig2.add_hline(y=100, line_dash="dash", line_color="grey", line_width=1)
+fig2.update_layout(
+    title=f"{entity_label} \u2014 Rebased Volume Index (Base = {base_month_lbl})",
+    yaxis_title="Index (100 = Base)",
+    xaxis_title="Period",
+    height=460,
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
 )
+st.plotly_chart(fig2, use_container_width=True)
 
-# Top 10 OEMs by total primary volume
-oem_totals = oem_agg.groupby("oem_name")["primary_vol"].sum().sort_values(ascending=False)
-top_oems = oem_totals.head(10).index.tolist()
-
-# Pivot: OEMs as rows, periods as columns
-pivot = oem_agg[oem_agg["oem_name"].isin(top_oems)].pivot_table(
-    index="oem_name", columns="label", values="delta_pct", aggfunc="first"
-)
-
-# Reindex to show only the last 6 periods and top OEM order
-available_periods = [p for p in last_periods if p in pivot.columns]
-if available_periods:
-    pivot = pivot.reindex(columns=available_periods)
-pivot = pivot.reindex([o for o in top_oems if o in pivot.index])
-
-# Format cells
-delta_display = pivot.copy()
-for col in delta_display.columns:
-    delta_display[col] = delta_display[col].apply(_fmt_delta_pct)
-
-delta_display.index.name = "OEM"
-st.dataframe(delta_display, use_container_width=True)
+# ── Transposed table ──
+idx_periods = idx_show["label"].tolist()
+idx_tbl = {
+    "Primary Index": [_fmt_index(v) for v in idx_show["pri_idx"]],
+    "Retail Index": [_fmt_index(v) for v in idx_show["ret_idx"]],
+    "Gap (pts)": [_fmt_index(v) for v in idx_show["idx_gap"]],
+}
+idx_tbl_df = pd.DataFrame(idx_tbl, index=idx_periods).T
+idx_tbl_df.index.name = "Metric"
+st.dataframe(idx_tbl_df, width="stretch")

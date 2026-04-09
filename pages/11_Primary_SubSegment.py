@@ -22,8 +22,6 @@ from components.analysis import (
 
 init_db()
 
-st.set_page_config(page_title="Sub-Segment Analysis", page_icon="\U0001f50e", layout="wide")
-
 # CSS for right-aligned tables
 st.markdown("""
 <style>

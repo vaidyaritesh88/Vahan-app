@@ -28,8 +28,6 @@ from components.analysis import (
 
 init_db()
 
-st.set_page_config(page_title="Primary OEM 360", page_icon="\U0001f3ed", layout="wide")
-
 # -- Right-align numbers in dataframes via CSS --
 st.markdown("""
 <style>

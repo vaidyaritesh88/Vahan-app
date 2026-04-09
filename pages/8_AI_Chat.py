@@ -17,7 +17,6 @@ from ai_chat.export import export_chat_summary, export_saved_items
 
 init_db()
 
-st.set_page_config(page_title="AI Chat", page_icon="💬", layout="wide")
 st.title("💬 AI Chat — Ask About Your Data")
 st.caption("Ask natural language questions about vehicle registration data. Get answers, charts, and calculations powered by Claude.")
 

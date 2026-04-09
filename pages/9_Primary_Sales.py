@@ -29,8 +29,6 @@ from components.analysis import (
 
 init_db()
 
-st.set_page_config(page_title="Primary Sales", page_icon="\U0001f4e6", layout="wide")
-
 st.markdown("""
 <style>
 div[data-testid="stDataFrame"] td { text-align: right !important; }

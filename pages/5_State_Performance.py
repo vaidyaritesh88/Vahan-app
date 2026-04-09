@@ -19,8 +19,6 @@ from components.charts import dual_axis_bar_line
 
 init_db()
 
-st.set_page_config(page_title="State Performance", page_icon="\U0001f4cd", layout="wide")
-
 # ── Right-align numbers in dataframes via CSS ──
 st.markdown("""
 <style>

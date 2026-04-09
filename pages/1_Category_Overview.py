@@ -29,8 +29,6 @@ from components.analysis import (
 
 init_db()
 
-st.set_page_config(page_title="Category Overview", page_icon="\U0001f4ca", layout="wide")
-
 # CSS for right-aligned tables
 st.markdown("""
 <style>

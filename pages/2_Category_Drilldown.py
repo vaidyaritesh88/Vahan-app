@@ -30,8 +30,6 @@ from components.analysis import (
 
 init_db()
 
-st.set_page_config(page_title="Category Drilldown", page_icon="\U0001f50d", layout="wide")
-
 st.markdown("""
 <style>
 div[data-testid="stDataFrame"] td { text-align: right !important; }

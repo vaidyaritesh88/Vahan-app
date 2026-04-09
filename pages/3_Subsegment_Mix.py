@@ -31,8 +31,6 @@ from config.settings import CATEGORY_CONFIG
 
 init_db()
 
-st.set_page_config(page_title="Subsegment Mix", page_icon="\u26a1", layout="wide")
-
 st.markdown("""
 <style>
 div[data-testid="stDataFrame"] td { text-align: right !important; }

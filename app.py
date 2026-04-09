@@ -1,16 +1,18 @@
-"""Vahan Vehicle Registration Tracker - Main Entry Point."""
+"""Vahan Vehicle Registration Tracker - Main Entry Point.
+
+Uses st.navigation() for grouped sidebar sections.
+"""
 import streamlit as st
 import os
 import sys
 
-# Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from database.schema import init_db
 
 st.set_page_config(
     page_title="Vahan Tracker",
-    page_icon="🚗",
+    page_icon="\U0001f697",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -20,43 +22,28 @@ if "db_initialized" not in st.session_state:
     init_db()
     st.session_state.db_initialized = True
 
-st.sidebar.title("Vahan Tracker")
-st.sidebar.markdown("Vehicle Registration Analytics")
-st.sidebar.divider()
+# ── Grouped Navigation ──
+pages = {
+    "Retail Sales (Sell-out)": [
+        st.Page("pages/1_Category_Overview.py", title="Category Overview", icon=":material/bar_chart:"),
+        st.Page("pages/2_Category_Drilldown.py", title="Category Drilldown", icon=":material/search:"),
+        st.Page("pages/3_Subsegment_Mix.py", title="Subsegment Mix", icon=":material/bolt:"),
+        st.Page("pages/4_OEM_360.py", title="OEM 360", icon=":material/apartment:"),
+        st.Page("pages/5_State_Performance.py", title="State Performance", icon=":material/location_on:"),
+    ],
+    "Primary Sales (Sell-in)": [
+        st.Page("pages/9_Primary_Sales.py", title="Category Overview", icon=":material/bar_chart:"),
+        st.Page("pages/11_Primary_SubSegment.py", title="Sub-Segment Analysis", icon=":material/search:"),
+        st.Page("pages/12_Primary_OEM_360.py", title="OEM 360", icon=":material/apartment:"),
+    ],
+    "Primary vs Retail": [
+        st.Page("pages/10_Primary_vs_Retail.py", title="Growth Comparison", icon=":material/compare_arrows:"),
+    ],
+    "Tools": [
+        st.Page("pages/6_Data_Management.py", title="Data Management", icon=":material/settings:"),
+        st.Page("pages/8_AI_Chat.py", title="AI Chat", icon=":material/chat:"),
+    ],
+}
 
-# Main landing page
-st.title("India Vehicle Registration Tracker")
-st.markdown("""
-**Data Source:** Vahan Portal (Ministry of Road Transport & Highways)
-
-Use the sidebar to navigate between analysis pages:
-
-| Page | Description |
-|------|-------------|
-| **Category Overview** | National volumes & YoY growth across all vehicle categories |
-| **Category Drilldown** | OEM breakdown, market share, growth rates (MoM/QoQ/YoY) |
-| **Subsegment Mix** | ICE / EV / CNG / Hybrid analysis + state EV penetration |
-| **OEM 360** | Deep-dive into any OEM - fuel-type-aware share & state analysis |
-| **State Performance** | Regional analysis & state-level OEM market share |
-| **Data Management** | Upload Excel, run Vahan scraper, monitor data freshness |
-| **OEM Comparison** | Side-by-side OEM comparison: growth, share (Monthly/Quarterly/FY/FYTD) |
-| **AI Chat** | Ask natural language questions, get charts & calculations on demand |
-""")
-
-# Quick data status
-from database.queries import get_record_counts, get_latest_month
-
-counts = get_record_counts()
-ly, lm = get_latest_month()
-
-col1, col2, col3 = st.columns(3)
-with col1:
-    st.metric("National Records", f"{counts['national_monthly']:,}")
-with col2:
-    st.metric("State Records", f"{counts['state_monthly']:,}")
-with col3:
-    from components.formatters import format_month
-    st.metric("Latest Data", format_month(ly, lm))
-
-if counts["national_monthly"] == 0:
-    st.warning("No data loaded yet. Go to **Data Management** page to upload your Excel file.")
+pg = st.navigation(pages)
+pg.run()

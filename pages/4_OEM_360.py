@@ -47,7 +47,6 @@ from components.analysis import (
 
 init_db()
 
-st.set_page_config(page_title="OEM 360", page_icon="🏢", layout="wide")
 st.title("OEM 360 View")
 
 

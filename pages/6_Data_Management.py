@@ -17,7 +17,6 @@ from config.settings import DATA_DIR, ALL_STATES, VAHAN_SCRAPE_CONFIGS
 
 init_db()
 
-st.set_page_config(page_title="Data Management", page_icon="⚙️", layout="wide")
 st.title("Data Management")
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(["Excel Import", "State Data Scraper", "Primary Sales Import", "Data Status", "Local Setup Guide"])
