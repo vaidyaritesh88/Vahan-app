@@ -42,7 +42,7 @@ div[data-testid="stDataFrame"] table { font-size: 0.85rem; }
 
 st.title("Category Overview")
 
-BASE_CATS = ["PV", "2W", "3W", "CV"]
+BASE_CATS = ["PV", "2W", "3W", "CV", "TRACTORS"]
 
 
 # \u2500\u2500 Helpers \u2500\u2500

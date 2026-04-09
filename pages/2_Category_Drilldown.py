@@ -42,7 +42,7 @@ div[data-testid="stDataFrame"] table { font-size: 0.85rem; }
 
 st.title("Category Drilldown")
 
-BASE_CATS = ["PV", "2W", "3W", "CV"]
+BASE_CATS = ["PV", "2W", "3W", "CV", "TRACTORS"]
 
 
 def _period_lbl(row, freq):

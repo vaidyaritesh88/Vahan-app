@@ -1554,12 +1554,16 @@ def get_all_categories_monthly_from_vehcat():
     Maps vehcat category_groups to standard categories:
       PV, 2W, 3W -> direct (PV excludes tractor OEMs registered under LMV)
       LCV + MHCV + BUS -> CV
-      (TRACTORS not available in vehcat data)
+      TRACTORS -> synthetic category from tractor OEMs registered under LMV
 
     Returns DataFrame: year, month, category_code, volume
     """
+    import pandas as pd
+
     excl_ph, excl_params = _tractor_placeholders()
-    return _query_df(f"""
+
+    # Main categories (PV excludes tractor OEMs)
+    main = _query_df(f"""
         SELECT year, month,
                CASE
                    WHEN category_group IN ('LCV','MHCV','BUS') THEN 'CV'
@@ -1573,6 +1577,21 @@ def get_all_categories_monthly_from_vehcat():
         GROUP BY year, month, category_code
         ORDER BY year, month
     """, excl_params)
+
+    # TRACTORS = tractor OEMs that register under LMV
+    tractors = _query_df(f"""
+        SELECT year, month, 'TRACTORS' as category_code, SUM(volume) as volume
+        FROM national_oem_vehcat
+        WHERE category_group = 'PV'
+          AND month BETWEEN 1 AND 12
+          AND oem_name IN ({excl_ph})
+        GROUP BY year, month
+        ORDER BY year, month
+    """, excl_params)
+
+    if tractors.empty:
+        return main
+    return pd.concat([main, tractors], ignore_index=True)
 
 
 def get_category_oem_monthly_from_vehcat(category_code):
@@ -1591,6 +1610,17 @@ def get_category_oem_monthly_from_vehcat(category_code):
             GROUP BY year, month, oem_name
             ORDER BY year, month, oem_name
         """)
+    if category_code == 'TRACTORS':
+        excl_ph, excl_params = _tractor_placeholders()
+        return _query_df(f"""
+            SELECT year, month, oem_name, SUM(volume) as volume
+            FROM national_oem_vehcat
+            WHERE category_group = 'PV'
+              AND month BETWEEN 1 AND 12
+              AND oem_name IN ({excl_ph})
+            GROUP BY year, month, oem_name
+            ORDER BY year, month, oem_name
+        """, excl_params)
     if category_code == 'PV':
         excl_ph, excl_params = _tractor_placeholders()
         return _query_df(f"""
