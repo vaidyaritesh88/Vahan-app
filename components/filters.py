@@ -162,3 +162,34 @@ def main_category_selector(key="main_cat", label="Select Category"):
     options = dict(zip(cats["name"], cats["code"]))
     selected = st.sidebar.selectbox(label, list(options.keys()), key=key)
     return options[selected], selected
+
+def primary_period_selector(key="ps_period", label="Analysis Period"):
+    """Period preset selector using primary_sales data range (not national_monthly).
+
+    Returns (preset_name, year, month).
+    """
+    from database.queries import get_primary_available_months
+    months = get_primary_available_months()
+    if not months:
+        st.sidebar.warning("No primary sales data loaded yet.")
+        return None, None, None
+
+    preset = st.sidebar.selectbox(label, list(PERIOD_PRESETS.keys()), key=f"{key}_preset")
+
+    # Default to last completed month
+    from datetime import date as _date
+    _today = _date.today()
+    default_idx = 0
+    for i, (y, m) in enumerate(months):
+        if y == _today.year and m == _today.month:
+            continue
+        default_idx = i
+        break
+
+    options = [f"{format_month(y, m)}" for y, m in months]
+    selected = st.sidebar.selectbox("Reference Month", options, index=default_idx, key=f"{key}_ref")
+    idx = options.index(selected)
+    year, month = months[idx]
+
+    return preset, year, month
+

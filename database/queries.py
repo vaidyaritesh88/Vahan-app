@@ -1853,3 +1853,17 @@ def get_primary_oems_list(category):
     conn.close()
     return [r['oem_name'] for r in rows]
 
+def get_primary_available_months():
+    """Get all (year, month) pairs with primary sales data, descending.
+
+    Returns list of (year, month) tuples.
+    """
+    conn = get_connection()
+    rows = conn.execute("""
+        SELECT DISTINCT year, month FROM primary_sales
+        WHERE month BETWEEN 1 AND 12
+        ORDER BY year DESC, month DESC
+    """).fetchall()
+    conn.close()
+    return [(r['year'], r['month']) for r in rows]
+

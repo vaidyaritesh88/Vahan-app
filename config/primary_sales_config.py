@@ -11,9 +11,9 @@ PV_SEGMENT_ORDER = [
 ]
 
 PV_SUPER_SEGMENTS = {
-    "PC": ["Entry Hatchback", "Compact Hatchback", "Premium Hatchback",
+    "Total PC": ["Entry Hatchback", "Compact Hatchback", "Premium Hatchback",
            "Super Premium Hatchback", "Compact Sedan", "Upper Sedan", "Vans"],
-    "UV": ["Sub-compact SUV", "Compact SUV", "Mid-SUV", "Premium SUV", "MUV"],
+    "Total SUV": ["Sub-compact SUV", "Compact SUV", "Mid-SUV", "Premium SUV", "MUV"],
 }
 
 # Reverse lookup: segment -> super-segment
@@ -72,5 +72,5 @@ def get_segment_to_super(category):
 def get_super_segment_order(category):
     """Get ordered list of super-segments."""
     if category == "PV":
-        return ["PC", "UV"]
+        return ["Total PC", "Total SUV"]
     return ["Motorcycle", "Scooter", "Moped", "EV"]

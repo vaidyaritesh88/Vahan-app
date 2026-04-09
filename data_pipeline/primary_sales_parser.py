@@ -20,6 +20,7 @@ PV_OEM_MAP = {
     "Ford": "Ford", "Datsun": "Nissan", "Fiat": "Fiat",
     "FCA": "Stellantis", "Citroen": "Stellantis",
     "Basalt": "Stellantis", "EC3": "Stellantis",
+    "Vans": "Maruti Suzuki",  # Maruti Eeco is the only van
 }
 
 # 2W: Map OEM column value to canonical name
@@ -104,7 +105,16 @@ def parse_volume_4w(filepath):
         # Check if this is a segment header
         if label in PV_SEGMENTS:
             current_segment = label
-            continue
+            # Special case: "Vans" is both a segment header AND a data row
+            # (Maruti Eeco is the only van). Check if row has numeric data.
+            has_numeric = any(
+                isinstance(row[c], (int, float)) and row[c] > 0
+                for c in range(1, min(len(row), len(dates) + 1))
+                if row[c] is not None
+            )
+            if not has_numeric:
+                continue
+            # Fall through to treat as data row (OEM = "Maruti" for Vans)
 
         # Skip "Others" as a standalone row (segment-level other)
         if label == "Others":

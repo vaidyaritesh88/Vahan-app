@@ -1,7 +1,8 @@
 """Page 9: Primary Sales - Wholesale/dispatch sales analysis with PC/UV grouping.
 
 All analysis via TABLES except the category trend dual-axis bar+line chart.
-Segment tables include super-segment subtotals (PC/UV for PV, Motorcycle etc for 2W).
+Segment tables include super-segment subtotals (Total PC / Total SUV for PV,
+Total Motorcycle etc for 2W).
 """
 import streamlit as st
 import pandas as pd
@@ -19,8 +20,8 @@ from database.queries import (
 from config.primary_sales_config import (
     get_segment_order, get_super_segments, get_super_segment_order,
 )
-from components.filters import period_selector, top_n_selector
-from components.formatters import format_units, format_month
+from components.filters import primary_period_selector, top_n_selector
+from components.formatters import format_units, format_month, get_fy_label
 from components.charts import dual_axis_bar_line
 from components.analysis import (
     aggregate_by_frequency, filter_by_period, get_period_months, add_fy_columns,
@@ -62,6 +63,15 @@ def _period_lbl(row, freq):
     return format_month(int(row["year"]), int(row["month"]))
 
 
+def _fy_label_with_ytd(fy_start, data):
+    """Return 'FY26' or 'YTDFY26' depending on completeness."""
+    label = get_fy_label(fy_start)
+    fy_months = data[data["fy"] == fy_start]
+    if len(fy_months["month"].unique()) < 12:
+        return f"YTD{label}"
+    return label
+
+
 def _get_incomplete_periods(raw_data, freq):
     if freq == "monthly":
         return set()
@@ -75,17 +85,32 @@ def _get_incomplete_periods(raw_data, freq):
     return set()
 
 
+def _apply_ytd_labels(agg_df, raw_data, freq):
+    """Replace FY labels with YTDFY labels for incomplete fiscal years."""
+    if freq != "annual":
+        return agg_df
+    df_fy = add_fy_columns(raw_data)
+    agg_df = agg_df.copy()
+    for idx, row in agg_df.iterrows():
+        if "fy" in row.index:
+            new_label = _fy_label_with_ytd(int(row["fy"]), df_fy)
+            agg_df.at[idx, "period_label"] = new_label
+            agg_df.at[idx, "fy_label"] = new_label
+    return agg_df
+
+
 def _compute_yoy_table(pivot_vol, row_labels, ordered_labels, freq, incomplete_periods):
-    """Build a YoY growth % DataFrame from a volume pivot table."""
+    """Build a YoY growth % DataFrame from a volume pivot table.
+
+    For annual frequency with incomplete (YTD) periods, compares only
+    the months that exist in the current FY against the same months
+    in the prior year.
+    """
     data = pivot_vol.copy().astype(float)
     result = pd.DataFrame(index=row_labels, columns=ordered_labels, dtype=object)
 
     for label in row_labels:
         for col_idx, col in enumerate(ordered_labels):
-            if col in incomplete_periods:
-                result.loc[label, col] = "\u2014"
-                continue
-
             curr = data.loc[label, col] if label in data.index and col in data.columns else None
 
             if freq == "monthly" and col_idx >= 12:
@@ -96,10 +121,6 @@ def _compute_yoy_table(pivot_vol, row_labels, ordered_labels, freq, incomplete_p
                 prev_label = ordered_labels[col_idx - 1]
             else:
                 prev_label = None
-
-            if prev_label and prev_label in incomplete_periods:
-                result.loc[label, col] = "\u2014"
-                continue
 
             if prev_label and prev_label in data.columns:
                 prev = data.loc[label, prev_label] if label in data.index else None
@@ -116,8 +137,9 @@ def _compute_yoy_table(pivot_vol, row_labels, ordered_labels, freq, incomplete_p
 def _build_segment_pivot(filtered_seg, freq, category, ordered_labels):
     """Build segment volume pivot with super-segment subtotals in correct order.
 
-    Returns (pivot_df, row_order) where row_order includes segments,
+    Returns (pivot_df, row_order, bold_rows) where row_order includes segments,
     subtotals, and grand total in the specified display order.
+    Segments are indented with 2-space prefix; subtotals and grand total are not.
     """
     seg_order = get_segment_order(category)
     super_segs = get_super_segments(category)
@@ -152,19 +174,19 @@ def _build_segment_pivot(filtered_seg, freq, category, ordered_labels):
             subtotals[ss_name] = pivot.loc[members].sum(axis=0)
 
     grand_total = pivot.sum(axis=0)
-    grand_total_label = f"{category} TOTAL"
+    grand_total_label = f"Total {category}"
 
-    # Assemble rows in correct order
+    # Assemble rows in correct order with indented segment names
     rows = []
     row_order = []
     for ss_name in super_order:
         members = [s for s in super_segs[ss_name] if s in pivot.index]
         for seg in members:
             rows.append(pivot.loc[seg])
-            row_order.append(seg)
+            row_order.append(f"  {seg}")  # 2-space indent for sub-segments
         if ss_name in subtotals:
             rows.append(subtotals[ss_name])
-            row_order.append(ss_name)
+            row_order.append(ss_name)  # No indent for subtotals
 
     rows.append(grand_total)
     row_order.append(grand_total_label)
@@ -172,7 +194,10 @@ def _build_segment_pivot(filtered_seg, freq, category, ordered_labels):
     final = pd.DataFrame(rows, index=row_order, columns=ordered_labels)
 
     # Identify bold rows (subtotals + grand total)
-    bold_rows = set(subtotals.keys()) | {grand_total_label}
+    bold_rows = set()
+    for ss_name in subtotals:
+        bold_rows.add(ss_name)
+    bold_rows.add(grand_total_label)
 
     return final, row_order, bold_rows
 
@@ -181,7 +206,7 @@ def _build_segment_pivot(filtered_seg, freq, category, ordered_labels):
 # SIDEBAR
 # ====================
 selected_cat = st.sidebar.selectbox("Category", CATEGORIES, key="ps_cat")
-preset, ref_year, ref_month = period_selector(key="ps_period")
+preset, ref_year, ref_month = primary_period_selector(key="ps_period")
 if ref_year is None:
     st.warning("No data loaded. Upload data or run scraper in Data Management.")
     st.stop()
@@ -312,6 +337,8 @@ else:
         ).reset_index()
         cat_agg["date"] = cat_agg["fy"].apply(lambda y: pd.Timestamp(int(y), 10, 1))
         cat_agg["period_label"] = cat_agg["fy_label"]
+        # Apply YTD labels for incomplete fiscal years
+        cat_agg = _apply_ytd_labels(cat_agg, filtered_cat, freq)
 
 cat_agg = cat_agg.sort_values("date")
 
@@ -328,7 +355,13 @@ def _get_cat_yoy(row):
         prev = prev[prev["quarter"] == row["quarter"]]
         prev = prev.groupby(["fy", "quarter"]).agg(volume=("volume", "sum")).reset_index()
     else:
-        prev = full_cat[full_cat["fy"] == row["fy"] - 1]
+        # For annual: if current FY is incomplete, compare only matching months
+        curr_fy = int(row["fy"])
+        curr_fy_data = full_cat[full_cat["fy"] == curr_fy]
+        curr_months = set(curr_fy_data["month"].unique())
+        prev_fy_data = full_cat[full_cat["fy"] == curr_fy - 1]
+        # Only compare months that exist in the current FY
+        prev = prev_fy_data[prev_fy_data["month"].isin(curr_months)]
         prev = prev.groupby("fy").agg(volume=("volume", "sum")).reset_index()
     if prev.empty:
         return None
@@ -337,9 +370,6 @@ def _get_cat_yoy(row):
 
 
 cat_agg["yoy_pct"] = cat_agg.apply(_get_cat_yoy, axis=1)
-
-if incomplete_periods and freq != "monthly":
-    cat_agg.loc[cat_agg["period_label"].isin(incomplete_periods), "yoy_pct"] = np.nan
 
 cat_agg["label"] = cat_agg["period_label"]
 chart_df = cat_agg.dropna(subset=["yoy_pct"]).copy()
@@ -350,12 +380,12 @@ if not chart_df.empty:
         title=f"{selected_cat} Primary Sales & YoY Growth",
         bar_name="Volume", line_name="YoY %",
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 else:
     import plotly.express as px
     fig = px.bar(cat_agg, x="label", y="volume", title=f"{selected_cat} Primary Sales")
     fig.update_layout(height=420)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 st.divider()
 
@@ -378,7 +408,15 @@ if not seg_monthly.empty:
     filtered_seg = filter_by_period(seg_monthly, start_date, end_date)
 
     if not filtered_seg.empty:
-        result = _build_segment_pivot(filtered_seg, freq, selected_cat, ordered_labels)
+        # Apply YTD labels to segment data too
+        if freq == "annual":
+            filtered_seg_fy = add_fy_columns(filtered_seg)
+            # Rebuild ordered_labels with YTD labels for segment tables
+            seg_ordered_labels = ordered_labels  # already has YTD labels from cat_agg
+        else:
+            seg_ordered_labels = ordered_labels
+
+        result = _build_segment_pivot(filtered_seg, freq, selected_cat, seg_ordered_labels)
         if result[0] is not None:
             seg_pivot, seg_row_order, bold_rows = result
 
@@ -388,22 +426,21 @@ if not seg_monthly.empty:
             for col in vol_disp.columns:
                 vol_disp[col] = vol_disp[col].apply(_fmt_vol)
             vol_disp.index.name = "Segment"
-            st.dataframe(vol_disp, use_container_width=True)
+            st.dataframe(vol_disp, width="stretch")
 
             # Section 4: Segment YoY Growth (expander)
             with st.expander("Segment YoY Growth %"):
                 seg_yoy = _compute_yoy_table(
-                    seg_pivot, seg_row_order, ordered_labels, freq, incomplete_periods
+                    seg_pivot, seg_row_order, seg_ordered_labels, freq, incomplete_periods
                 )
                 seg_yoy.index.name = "Segment"
-                st.dataframe(seg_yoy, use_container_width=True)
+                st.dataframe(seg_yoy, width="stretch")
 
             # Section 5: Segment Mix % (expander)
             with st.expander("Segment Mix %"):
-                grand_label = f"{selected_cat} TOTAL"
+                grand_label = f"Total {selected_cat}"
                 totals_row = seg_pivot.loc[grand_label] if grand_label in seg_pivot.index else seg_pivot.sum(axis=0)
                 mix_disp = seg_pivot.copy()
-                # Only show individual segments (not subtotals/grand total)
                 for col in mix_disp.columns:
                     total = totals_row[col]
                     if pd.notna(total) and total > 0:
@@ -413,7 +450,7 @@ if not seg_monthly.empty:
                     else:
                         mix_disp[col] = "\u2014"
                 mix_disp.index.name = "Segment"
-                st.dataframe(mix_disp, use_container_width=True)
+                st.dataframe(mix_disp, width="stretch")
         else:
             st.info("No segment data for the selected period.")
     else:
@@ -475,6 +512,11 @@ if not oem_agg_frames:
 oem_tables = pd.concat(oem_agg_frames, ignore_index=True)
 oem_tables["label"] = oem_tables.apply(lambda r: _period_lbl(r, freq), axis=1)
 
+# Apply YTD labels for OEM tables too
+if freq == "annual":
+    oem_tables = _apply_ytd_labels(oem_tables, filtered_oem, freq)
+    oem_tables["label"] = oem_tables["period_label"]
+
 oem_pivot = oem_tables.pivot_table(
     index="oem_name", columns="label", values="volume", aggfunc="sum"
 )
@@ -497,7 +539,7 @@ oem_vol_disp = oem_pivot.copy()
 for col in oem_vol_disp.columns:
     oem_vol_disp[col] = oem_vol_disp[col].apply(_fmt_vol)
 oem_vol_disp.index.name = "OEM"
-st.dataframe(oem_vol_disp, use_container_width=True)
+st.dataframe(oem_vol_disp, width="stretch")
 
 # Section 7: OEM YoY Growth (expander)
 with st.expander("OEM YoY Growth %"):
@@ -505,7 +547,7 @@ with st.expander("OEM YoY Growth %"):
         oem_pivot, oem_row_labels, ordered_labels, freq, incomplete_periods
     )
     oem_yoy.index.name = "OEM"
-    st.dataframe(oem_yoy, use_container_width=True)
+    st.dataframe(oem_yoy, width="stretch")
 
 # Section 8: OEM Market Share (expander)
 with st.expander("OEM Market Share %"):
@@ -522,4 +564,4 @@ with st.expander("OEM Market Share %"):
             share_disp[col] = "\u2014"
 
     share_disp.index.name = "OEM"
-    st.dataframe(share_disp, use_container_width=True)
+    st.dataframe(share_disp, width="stretch")
