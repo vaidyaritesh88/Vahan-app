@@ -143,7 +143,10 @@ def _clip_yoy(series):
 # SIDEBAR
 # ══════════════════════════════════════════════════════════════════════════════
 CATEGORIES = ["PV", "2W"]
-selected_cat = st.sidebar.selectbox("Category", CATEGORIES, key="pri_cat")
+cat_kwargs = {"key": "pri_cat"}
+if "pri_cat" not in st.session_state:
+    cat_kwargs["index"] = CATEGORIES.index("2W") if "2W" in CATEGORIES else 0
+selected_cat = st.sidebar.selectbox("Category", CATEGORIES, **cat_kwargs)
 
 preset, ref_year, ref_month = primary_period_selector(key="pri_period")
 if ref_year is None:
