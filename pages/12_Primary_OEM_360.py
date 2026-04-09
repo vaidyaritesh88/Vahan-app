@@ -308,7 +308,7 @@ combined_trend = pd.DataFrame([
     yoy_vals,
 ], index=["Volume", "YoY %"])
 combined_trend.index.name = ""
-st.dataframe(combined_trend.iloc[:, ::-1], width="stretch")
+st.dataframe(combined_trend, width="stretch")
 
 st.divider()
 
@@ -450,7 +450,7 @@ if has_seg_data and not oem_seg_filtered.empty:
                 lambda v: f"{int(v):,}" if pd.notna(v) and v > 0 else "\u2014"
             )
         vol_display.index.name = "Segment"
-        st.dataframe(vol_display.iloc[:, ::-1], width="stretch")
+        st.dataframe(vol_display, width="stretch")
 
         # Table B: Mix %
         with st.expander("Segment Mix % (of OEM total)"):
@@ -467,7 +467,7 @@ if has_seg_data and not oem_seg_filtered.empty:
                 else:
                     mix_pct[col] = "\u2014"
             mix_pct.index.name = "Segment"
-            st.dataframe(mix_pct.iloc[:, ::-1], width="stretch")
+            st.dataframe(mix_pct, width="stretch")
 
     st.divider()
 
@@ -527,7 +527,7 @@ if has_seg_data and not oem_seg_filtered.empty:
 
         share_df = pd.DataFrame(share_rows).T.reindex(columns=ordered_labels)
         share_df.index.name = "Segment"
-        st.dataframe(share_df.iloc[:, ::-1], width="stretch")
+        st.dataframe(share_df, width="stretch")
 
         # Numeric pivot for line chart
         seg_share_pivot = pd.DataFrame(seg_share_numeric).T.reindex(columns=ordered_labels)
@@ -581,7 +581,7 @@ if has_seg_data and not oem_seg_filtered.empty:
         if growth_rows:
             growth_df = pd.DataFrame(growth_rows).T.reindex(columns=ordered_labels)
             growth_df.index.name = "Segment"
-            st.dataframe(growth_df.iloc[:, ::-1], width="stretch")
+            st.dataframe(growth_df, width="stretch")
         else:
             st.info("Not enough data to compute YoY growth.")
 

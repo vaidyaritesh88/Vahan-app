@@ -281,7 +281,7 @@ if agg_frames:
             lambda v: f"{int(v):,}" if pd.notna(v) and v > 0 else "\u2014"
         )
     vol_display.index.name = "Subsegment"
-    st.dataframe(vol_display.iloc[:, ::-1], use_container_width=True)
+    st.dataframe(vol_display, use_container_width=True)
 
     # Table B: YoY Growth %
     with st.expander("YoY Growth %"):
@@ -325,7 +325,7 @@ if agg_frames:
                     yoy_result.loc[sub, col] = "\u2014"
 
         yoy_result.index.name = "Subsegment"
-        st.dataframe(yoy_result.iloc[:, ::-1], use_container_width=True)
+        st.dataframe(yoy_result, use_container_width=True)
 
     # Table C: Penetration %
     with st.expander("Penetration %"):
@@ -342,7 +342,7 @@ if agg_frames:
                 pen_display[col] = "\u2014"
 
         pen_display.index.name = "Subsegment"
-        st.dataframe(pen_display.iloc[:, ::-1], use_container_width=True)
+        st.dataframe(pen_display, use_container_width=True)
 
     # ── Subsegment Share % Trend (line chart) ──
     st.markdown("**Subsegment Share % Trend**")
@@ -469,7 +469,7 @@ for sub_code, sub_label in sub_codes.items():
                 lambda v: f"{int(v):,}" if pd.notna(v) and v > 0 else "\u2014"
             )
         vol_disp.index.name = "OEM"
-        st.dataframe(vol_disp.iloc[:, ::-1], width="stretch")
+        st.dataframe(vol_disp, width="stretch")
 
         # ── Share % table ──
         st.markdown("**Market Share % (within subsegment)**")
@@ -484,7 +484,7 @@ for sub_code, sub_label in sub_codes.items():
             else:
                 share_disp[c] = "\u2014"
         share_disp.index.name = "OEM"
-        st.dataframe(share_disp.iloc[:, ::-1], width="stretch")
+        st.dataframe(share_disp, width="stretch")
 
         # ── Market share line chart ──
         share_long = []

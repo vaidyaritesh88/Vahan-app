@@ -315,7 +315,7 @@ for idx in vol_df.index:
 
 combined_df = pd.DataFrame(combined_rows)
 combined_df.index.name = "Sub-Segment"
-st.dataframe(combined_df.iloc[:, ::-1], width="stretch")
+st.dataframe(combined_df, width="stretch")
 
 st.divider()
 
@@ -373,7 +373,7 @@ for idx in pivot_model.index:
 
 combined_model_df = pd.DataFrame(combined_model_rows)
 combined_model_df.index.name = "Model"
-st.dataframe(combined_model_df.iloc[:, ::-1], width="stretch")
+st.dataframe(combined_model_df, width="stretch")
 
 
 
@@ -433,7 +433,7 @@ for idx in pivot_oem.index:
 
 combined_oem_df = pd.DataFrame(combined_oem_rows)
 combined_oem_df.index.name = "OEM"
-st.dataframe(combined_oem_df.iloc[:, ::-1], width="stretch")
+st.dataframe(combined_oem_df, width="stretch")
 
 
 
@@ -446,7 +446,7 @@ with st.expander("OEM Market Share % (within sub-segment)"):
     share_oem = _build_share_table(pivot_oem, ordered_labels_oem)
     if share_oem is not None and not share_oem.empty:
         share_oem.index.name = "OEM"
-        st.dataframe(share_oem.iloc[:, ::-1], width="stretch")
+        st.dataframe(share_oem, width="stretch")
     else:
         st.info("Not enough data to compute shares.")
 

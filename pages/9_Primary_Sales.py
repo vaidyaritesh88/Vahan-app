@@ -445,7 +445,7 @@ if not seg_monthly.empty:
             for col in vol_disp.columns:
                 vol_disp[col] = vol_disp[col].apply(_fmt_vol)
             vol_disp.index.name = "Segment"
-            st.dataframe(vol_disp.iloc[:, ::-1], width="stretch")
+            st.dataframe(vol_disp, width="stretch")
 
             # Section 4: Segment YoY Growth (expander)
             with st.expander("Segment YoY Growth %"):
@@ -469,7 +469,7 @@ if not seg_monthly.empty:
                     else:
                         mix_disp[col] = "\u2014"
                 mix_disp.index.name = "Segment"
-                st.dataframe(mix_disp.iloc[:, ::-1], width="stretch")
+                st.dataframe(mix_disp, width="stretch")
 
             # ── Segment Mix % 100% Stacked Column Chart ──
             st.markdown("**Segment Mix % Trend**")
@@ -596,7 +596,7 @@ oem_vol_disp = oem_pivot.copy()
 for col in oem_vol_disp.columns:
     oem_vol_disp[col] = oem_vol_disp[col].apply(_fmt_vol)
 oem_vol_disp.index.name = "OEM"
-st.dataframe(oem_vol_disp.iloc[:, ::-1], width="stretch")
+st.dataframe(oem_vol_disp, width="stretch")
 
 # Section 7: OEM YoY Growth (expander)
 with st.expander("OEM YoY Growth %"):

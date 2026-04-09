@@ -341,7 +341,7 @@ if not cat_monthly.empty:
             display_vol.index.name = "Category"
 
             st.markdown(f"**Category Volume ({freq_title})**")
-            st.dataframe(display_vol.iloc[:, ::-1], use_container_width=True)
+            st.dataframe(display_vol, use_container_width=True)
 
             # 3C: YoY Growth Table
             # Use full data for prior-year lookup
@@ -411,7 +411,7 @@ if not cat_monthly.empty:
             display_growth = growth_df.map(_fmt_growth)
 
             with st.expander(f"Category YoY Growth ({freq_title}) (%)", expanded=False):
-                st.dataframe(display_growth.iloc[:, ::-1], use_container_width=True)
+                st.dataframe(display_growth, use_container_width=True)
 
     st.divider()
 
@@ -587,7 +587,7 @@ if has_oem_subsegment_data(oem_normalized):
                 display_sub_vol.index.name = "Sub-Category"
 
                 st.markdown(f"**{bc_name} Sub-Category Volume ({freq_title_sub})**")
-                st.dataframe(display_sub_vol.iloc[:, ::-1], use_container_width=True)
+                st.dataframe(display_sub_vol, use_container_width=True)
 
                 # ── 3B-3: YoY Growth Table ──
                 # Build full (unfiltered) long-form data for prior-year comparisons
@@ -686,7 +686,7 @@ if has_oem_subsegment_data(oem_normalized):
 
                     if not growth_sub_df.dropna(how="all", axis=1).empty:
                         with st.expander(f"{bc_name} Sub-Category — YoY Growth ({freq_title_sub}) (%)", expanded=False):
-                            st.dataframe(display_sub_growth.iloc[:, ::-1], use_container_width=True)
+                            st.dataframe(display_sub_growth, use_container_width=True)
 
                 st.markdown("---")
 
@@ -829,7 +829,7 @@ if not market_monthly.empty and not cat_monthly.empty:
                 display_share.index.name = "Segment"
 
                 with st.expander(f"{bc} — Share % Table", expanded=False):
-                    st.dataframe(display_share.iloc[:, ::-1], use_container_width=True)
+                    st.dataframe(display_share, use_container_width=True)
 
                 # Volume detail table: OEM Vol / Market Total per series per month
                 vol_rows_list = []
@@ -857,7 +857,7 @@ if not market_monthly.empty and not cat_monthly.empty:
                     display_oem_vol.index.name = "Segment"
 
                     with st.expander(f"{bc} — OEM Volume Detail", expanded=False):
-                        st.dataframe(display_oem_vol.iloc[:, ::-1], use_container_width=True)
+                        st.dataframe(display_oem_vol, use_container_width=True)
 
             st.markdown("---")
 
@@ -941,7 +941,7 @@ if has_state_data():
                 display_state_vol.index.name = "State"
 
                 st.markdown("**State-wise Volume**")
-                st.dataframe(display_state_vol.iloc[:, ::-1], use_container_width=True)
+                st.dataframe(display_state_vol, use_container_width=True)
 
                 # ── Contribution % table ──
                 col_totals = pivot_state.loc["TOTAL"]
@@ -952,7 +952,7 @@ if has_state_data():
                 display_contrib.index.name = "State"
 
                 with st.expander("State Contribution %", expanded=False):
-                    st.dataframe(display_contrib.iloc[:, ::-1], use_container_width=True)
+                    st.dataframe(display_contrib, use_container_width=True)
 
                 # ── 5C: State YoY Growth Table ──
                 # Build per-state volumes aggregated by frequency, then compute YoY
@@ -1038,7 +1038,7 @@ if has_state_data():
                         display_state_growth = growth_df_state.map(_fmt_growth)
 
                         st.markdown("**State YoY Growth**")
-                        st.dataframe(display_state_growth.iloc[:, ::-1], use_container_width=True)
+                        st.dataframe(display_state_growth, use_container_width=True)
     else:
         st.info("No state data for this OEM.")
 else:
