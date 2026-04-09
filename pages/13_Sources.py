@@ -16,7 +16,7 @@ st.markdown("""
 | Attribute | Detail |
 |-----------|--------|
 | **Source** | [Vahan Portal](https://vahan.parivahan.gov.in/vahan4dashboard/) — Ministry of Road Transport & Highways, Govt. of India |
-| **What it measures** | Vehicle **registrations** at RTOs across India. This represents retail sales (sell-out) — the point at which a vehicle is sold to the end customer and registered. |
+| **What it measures** | Vehicle **registrations** at RTOs across India. This represents retail sales (sell-out) — the point at which a vehicle is sold to the end customer and registered. **Domestic only** — vehicles registered in India (exports are never included since they are never registered at Indian RTOs). |
 | **Granularity** | Monthly, by State, by OEM (Maker), by Vehicle Category, by Fuel Type |
 | **Coverage** | All states and UTs **except Telangana and Odisha** (these states do not report to Vahan consistently) |
 | **History** | Available from April 2017 onwards in our database |
@@ -31,9 +31,9 @@ st.markdown("""
 | Attribute | Detail |
 |-----------|--------|
 | **Source** | Monthly sales data reported by OEMs (company filings, SIAM, press releases) |
-| **What it measures** | Factory **dispatches** (wholesale) from manufacturer to dealer. This represents primary sales (sell-in) — vehicles shipped from factory to dealership, not yet sold to end customer. |
+| **What it measures** | Factory **dispatches** (wholesale) from manufacturer to dealer. This represents primary sales (sell-in) — vehicles shipped from factory to dealership, not yet sold to end customer. **Domestic only** — exports are excluded. |
 | **Granularity** | Monthly, by OEM, by Model, by Sub-segment (Entry HB, Compact SUV, etc.) |
-| **Coverage** | All India (complete national coverage) |
+| **Coverage** | All India (complete national coverage, domestic dispatches only) |
 | **History** | PV: October 2014 onwards; 2W: June 2008 onwards |
 | **Update frequency** | Monthly, typically within 15-20 days of month-end |
 | **Import method** | Excel upload via Data Management page |
@@ -177,15 +177,17 @@ st.divider()
 st.header("Data Caveats & Known Limitations")
 
 st.markdown("""
-1. **Missing states in retail data:** Telangana and Odisha do not report to the Vahan portal consistently. Retail (sell-out) absolute volumes are therefore ~5-8% lower than actual national totals.
+1. **Domestic sales only:** Both datasets reflect **domestic Indian sales only**. Primary (sell-in) data from OEM filings excludes exports — only factory dispatches to Indian dealerships are captured. Retail (sell-out) data from Vahan is inherently domestic since it tracks registrations at Indian RTOs. Export volumes are NOT reflected anywhere in this dashboard.
 
-2. **Tractor classification:** On the Vahan portal, tractors are registered under vehicle category LMV (Light Motor Vehicle). We exclude known tractor OEMs (Mahindra Tractors, Sonalika, Escorts, TAFE, John Deere, etc.) from the PV category and show them separately as TRACTORS.
+2. **Missing states in retail data:** Telangana and Odisha do not report to the Vahan portal consistently. Retail (sell-out) absolute volumes are therefore ~5-8% lower than actual national totals.
 
-3. **OEM name normalization:** The Vahan portal and OEM filings use different legal entity names (e.g., "TATA MOTORS LTD", "TATA MOTORS PASSENGER VEHICLES LTD", "TATA PASSENGER ELECTRIC MOBILITY LTD" all map to "Tata Motors"). Our normalization maps these to canonical names for consistent analysis.
+3. **Tractor classification:** On the Vahan portal, tractors are registered under vehicle category LMV (Light Motor Vehicle). We exclude known tractor OEMs (Mahindra Tractors, Sonalika, Escorts, TAFE, John Deere, etc.) from the PV category and show them separately as TRACTORS.
 
-4. **Primary vs Retail OEM matching:** Not all OEMs in primary data have exact matches in retail data (and vice versa). The comparison works best for major OEMs where both datasets have consistent coverage.
+4. **OEM name normalization:** The Vahan portal and OEM filings use different legal entity names (e.g., "TATA MOTORS LTD", "TATA MOTORS PASSENGER VEHICLES LTD", "TATA PASSENGER ELECTRIC MOBILITY LTD" all map to "Tata Motors"). Our normalization maps these to canonical names for consistent analysis.
 
-5. **COVID base effects:** April-June 2020 had near-zero volumes due to lockdowns, causing April-June 2021 to show absurdly high YoY growth (+1000%+). Charts clip the YoY axis to -80% to +120% and mark outliers with triangle markers.
+5. **Primary vs Retail OEM matching:** Not all OEMs in primary data have exact matches in retail data (and vice versa). The comparison works best for major OEMs where both datasets have consistent coverage.
 
-6. **Data freshness:** Retail data depends on Vahan portal scraping (run locally). Primary data depends on Excel file uploads. Check the Data Management page for last update timestamps.
+6. **COVID base effects:** April-June 2020 had near-zero volumes due to lockdowns, causing April-June 2021 to show absurdly high YoY growth (+1000%+). Charts clip the YoY axis to -80% to +120% and mark outliers with triangle markers.
+
+7. **Data freshness:** Retail data depends on Vahan portal scraping (run locally). Primary data depends on Excel file uploads. Check the Data Management page for last update timestamps.
 """)
