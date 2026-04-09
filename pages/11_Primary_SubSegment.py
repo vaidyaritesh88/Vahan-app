@@ -332,14 +332,14 @@ if freq == "annual":
     model_agg = _apply_ytd_labels(model_agg, filtered_model, freq)
 
 model_agg["label"] = model_agg.apply(lambda r: _period_lbl(r, freq), axis=1)
-ordered_labels = model_agg.sort_values("date")["label"].unique().tolist()
+ordered_labels_model = model_agg.sort_values("date")["label"].unique().tolist()
 
 # Pivot: model as rows, periods as columns
 model_agg["display_name"] = model_agg["model_name"] + " (" + model_agg["oem_name"] + ")"
 pivot_model = model_agg.pivot_table(
     index="display_name", columns="label", values="volume", aggfunc="sum"
 )
-pivot_model = pivot_model.reindex(columns=ordered_labels)
+pivot_model = pivot_model.reindex(columns=ordered_labels_model)
 
 # Sort by total volume desc
 pivot_model["_total"] = pivot_model.sum(axis=1)
