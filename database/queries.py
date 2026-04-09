@@ -1853,35 +1853,61 @@ def get_primary_oems_list(category):
     conn.close()
     return [r['oem_name'] for r in rows]
 
-def get_primary_available_months():
+def get_primary_available_months(skip_partial=True):
     """Get all (year, month) pairs with primary sales data, descending.
 
+    If skip_partial=True, the latest month is excluded if its total volume
+    is less than 50% of the trailing 3-month average (catches partial imports).
+
     Returns list of (year, month) tuples.
     """
     conn = get_connection()
     rows = conn.execute("""
-        SELECT DISTINCT year, month FROM primary_sales
+        SELECT year, month, SUM(volume) as vol
+        FROM primary_sales
         WHERE month BETWEEN 1 AND 12
+        GROUP BY year, month
         ORDER BY year DESC, month DESC
     """).fetchall()
     conn.close()
-    return [(r['year'], r['month']) for r in rows]
 
-def get_vehcat_available_months():
+    months = [(r['year'], r['month']) for r in rows]
+
+    if skip_partial and len(rows) >= 4:
+        latest_vol = rows[0]['vol']
+        prior_avg = sum(r['vol'] for r in rows[1:4]) / 3
+        if prior_avg > 0 and latest_vol < prior_avg * 0.5:
+            months = months[1:]
+
+    return months
+
+def get_vehcat_available_months(skip_partial=True):
     """Get all (year, month) pairs with scraped vehcat data, descending.
 
-    This should be used by retail pages instead of get_available_months()
-    which queries national_monthly (Excel) and may show months with no
-    scraped data.
+    If skip_partial=True (default), the latest month is excluded if its
+    total volume is less than 50% of the trailing 3-month average.
+    This catches mid-month scrapes that have incomplete data.
 
     Returns list of (year, month) tuples.
     """
     conn = get_connection()
     rows = conn.execute("""
-        SELECT DISTINCT year, month FROM national_oem_vehcat
+        SELECT year, month, SUM(volume) as vol
+        FROM national_oem_vehcat
         WHERE month BETWEEN 1 AND 12
+        GROUP BY year, month
         ORDER BY year DESC, month DESC
     """).fetchall()
     conn.close()
-    return [(r['year'], r['month']) for r in rows]
+
+    months = [(r['year'], r['month']) for r in rows]
+
+    if skip_partial and len(rows) >= 4:
+        latest_vol = rows[0]['vol']
+        prior_avg = sum(r['vol'] for r in rows[1:4]) / 3
+        if prior_avg > 0 and latest_vol < prior_avg * 0.5:
+            # Latest month is likely a partial scrape — skip it
+            months = months[1:]
+
+    return months
 
