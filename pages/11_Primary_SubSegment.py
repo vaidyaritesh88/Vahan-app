@@ -288,18 +288,23 @@ for _, r in seg_agg.iterrows():
 vol_df = pd.DataFrame([vol_row], index=[selected_segment])
 vol_df = vol_df.reindex(columns=ordered_labels_seg)
 
-st.markdown("**Volume (units)**")
-vol_display = vol_df.copy()
-for c in vol_display.columns:
-    vol_display[c] = vol_display[c].apply(_fmt_vol)
-vol_display.index.name = "Sub-Segment"
-st.dataframe(vol_display, width="stretch")
-
-# YoY table (immediately below, no expander)
-st.markdown("**YoY Growth %**")
+# Combine volume + YoY into one table with alternating rows
 yoy_seg = _build_yoy_table(vol_df, ordered_labels_seg, incomplete_periods, freq)
-yoy_seg.index.name = "Sub-Segment"
-st.dataframe(yoy_seg, width="stretch")
+
+combined_rows = []
+for idx in vol_df.index:
+    # Volume row
+    vol_vals = {c: _fmt_vol(vol_df.loc[idx, c]) for c in ordered_labels_seg}
+    vol_vals_row = pd.Series(vol_vals, name=f"{idx} - Volume")
+    combined_rows.append(vol_vals_row)
+    # YoY row
+    yoy_vals = {c: yoy_seg.loc[idx, c] if idx in yoy_seg.index else "\u2014" for c in ordered_labels_seg}
+    yoy_vals_row = pd.Series(yoy_vals, name=f"{idx} - YoY %")
+    combined_rows.append(yoy_vals_row)
+
+combined_df = pd.DataFrame(combined_rows)
+combined_df.index.name = "Sub-Segment"
+st.dataframe(combined_df, width="stretch")
 
 st.divider()
 
@@ -345,34 +350,25 @@ total_row = pivot_model.sum(axis=0)
 total_row.name = "TOTAL"
 pivot_model = pd.concat([pivot_model, total_row.to_frame().T])
 
-st.markdown("**Volume (units)**")
-model_vol_display = pivot_model.copy()
-for c in model_vol_display.columns:
-    model_vol_display[c] = model_vol_display[c].apply(_fmt_vol)
-model_vol_display.index.name = "Model"
-st.dataframe(model_vol_display, width="stretch")
+# Combined Volume + YoY table
+yoy_model = _build_yoy_table(pivot_model, ordered_labels_model, incomplete_periods, freq)
+
+combined_model_rows = []
+for idx in pivot_model.index:
+    vol_vals = {c: _fmt_vol(pivot_model.loc[idx, c]) for c in ordered_labels_model}
+    combined_model_rows.append(pd.Series(vol_vals, name=f"{idx} - Volume"))
+    yoy_vals = {c: yoy_model.loc[idx, c] if idx in yoy_model.index else "\u2014" for c in ordered_labels_model}
+    combined_model_rows.append(pd.Series(yoy_vals, name=f"{idx} - YoY %"))
+
+combined_model_df = pd.DataFrame(combined_model_rows)
+combined_model_df.index.name = "Model"
+st.dataframe(combined_model_df, width="stretch")
+
 
 
 # ======================================================================
 # SECTION 4: Model YoY Growth Table (expander)
 # ======================================================================
-with st.expander("Model YoY Growth %"):
-    yoy_model = _build_yoy_table(pivot_model, ordered_labels, incomplete_periods, freq)
-    yoy_model.index.name = "Model"
-    st.dataframe(yoy_model, width="stretch")
-
-
-# ======================================================================
-# SECTION 5: Model Market Share Table (within sub-segment, expander)
-# ======================================================================
-with st.expander("Model Market Share % (within sub-segment)"):
-    share_model = _build_share_table(pivot_model, ordered_labels)
-    if share_model is not None and not share_model.empty:
-        share_model.index.name = "Model"
-        st.dataframe(share_model, width="stretch")
-    else:
-        st.info("Not enough data to compute shares.")
-
 st.divider()
 
 
@@ -414,18 +410,22 @@ total_row_oem = pivot_oem.sum(axis=0)
 total_row_oem.name = "TOTAL"
 pivot_oem = pd.concat([pivot_oem, total_row_oem.to_frame().T])
 
-st.markdown("**Volume (units)**")
-oem_vol_display = pivot_oem.copy()
-for c in oem_vol_display.columns:
-    oem_vol_display[c] = oem_vol_display[c].apply(_fmt_vol)
-oem_vol_display.index.name = "OEM"
-st.dataframe(oem_vol_display, width="stretch")
-
-
-st.markdown("**OEM YoY Growth %**")
+# Combined Volume + YoY table
 yoy_oem = _build_yoy_table(pivot_oem, ordered_labels_oem, incomplete_periods, freq)
-yoy_oem.index.name = "OEM"
-st.dataframe(yoy_oem, width="stretch")
+
+combined_oem_rows = []
+for idx in pivot_oem.index:
+    vol_vals = {c: _fmt_vol(pivot_oem.loc[idx, c]) for c in ordered_labels_oem}
+    combined_oem_rows.append(pd.Series(vol_vals, name=f"{idx} - Volume"))
+    yoy_vals = {c: yoy_oem.loc[idx, c] if idx in yoy_oem.index else "\u2014" for c in ordered_labels_oem}
+    combined_oem_rows.append(pd.Series(yoy_vals, name=f"{idx} - YoY %"))
+
+combined_oem_df = pd.DataFrame(combined_oem_rows)
+combined_oem_df.index.name = "OEM"
+st.dataframe(combined_oem_df, width="stretch")
+
+
+
 
 
 # ======================================================================

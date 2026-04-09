@@ -281,26 +281,23 @@ st.divider()
 # ====================
 st.subheader("Volume & YoY Trend")
 
-# Table A: Volume row
+# Combined Volume + YoY in one table
 vol_dict = {}
 for _, r in oem_agg.iterrows():
     vol_dict[r["label"]] = r["volume"]
-vol_row = pd.DataFrame([{col: _fmt_vol(vol_dict.get(col)) for col in ordered_labels}], index=["Volume"])
-vol_row.index.name = ""
-st.markdown("**OEM Volume (units)**")
-st.dataframe(vol_row, width="stretch")
 
-# Table B: YoY row (immediately below, no expander)
-# Build numeric pivot for YoY computation
 oem_pivot = pd.DataFrame(
     [{col: vol_dict.get(col, np.nan) for col in ordered_labels}],
     index=["Volume"],
 )
 yoy_vals = _compute_yoy_row(oem_pivot.astype(float), "Volume", ordered_labels, freq, incomplete_periods)
-yoy_row = pd.DataFrame([yoy_vals], index=["YoY %"])
-yoy_row.index.name = ""
-st.markdown("**YoY Growth**")
-st.dataframe(yoy_row, width="stretch")
+
+combined_trend = pd.DataFrame([
+    {col: _fmt_vol(vol_dict.get(col)) for col in ordered_labels},
+    yoy_vals,
+], index=["Volume", "YoY %"])
+combined_trend.index.name = ""
+st.dataframe(combined_trend, width="stretch")
 
 st.divider()
 
