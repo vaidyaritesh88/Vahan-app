@@ -275,14 +275,30 @@ tbl_data = {
     "Retail YoY %": [_fmt_growth(v) for v in merged["ret_yoy"]],
     "Gap (pp)": [_fmt_gap_pp(v) for v in merged["gap_pp"]],
 }
+
+# 3-month rolling average gap — only meaningful for monthly frequency
+if freq == "monthly":
+    rolling_gap = merged["gap_pp"].rolling(window=3, min_periods=2).mean().round(1)
+    tbl_data["3M Rolling Avg Gap (pp)"] = [
+        _fmt_gap_pp(v) if pd.notna(v) else "\u2014" for v in rolling_gap
+    ]
+
 tbl_df = pd.DataFrame(tbl_data, index=periods).T
 tbl_df.index.name = "Metric"
 st.dataframe(tbl_df, width="stretch")
-st.caption(
+
+caption_text = (
     "**Gap** = Primary YoY - Retail YoY. "
     "Positive (red) = primary growing faster (inventory building). "
     "Negative (green) = retail growing faster (destocking)."
 )
+if freq == "monthly":
+    caption_text += (
+        " **3M Rolling Avg Gap** smooths monthly noise to highlight sustained "
+        "divergence trends. A persistent positive rolling gap indicates steady "
+        "inventory accumulation at dealers."
+    )
+st.caption(caption_text)
 
 # ── Chart ──
 fig1 = go.Figure()
