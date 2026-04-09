@@ -1,7 +1,7 @@
 """Reusable Streamlit sidebar filter widgets."""
 import streamlit as st
 from database.queries import (
-    get_available_months, get_latest_month, get_main_categories,
+    get_available_months, get_latest_month, get_vehcat_available_months, get_main_categories,
     get_all_categories, get_all_oems_for_category, get_all_oems,
     get_states_with_data, has_state_data,
 )
@@ -122,10 +122,15 @@ def base_category_selector(key="base_cat"):
 def period_selector(key="period_preset", label="Analysis Period", default_preset="Last 3Y"):
     """Period preset selector. Returns (preset_name, year, month) for the reference month.
 
-    Defaults to last COMPLETED month (not current month which may have partial data).
+    Uses scraped vehcat data for available months (not Excel national_monthly
+    which may show months with no actual scraped data).
+    Defaults to the latest month with full scraped data.
     Session state is preserved across tab switches.
     """
-    months = get_available_months()
+    months = get_vehcat_available_months()
+    if not months:
+        # Fallback to national_monthly if no vehcat data
+        months = get_available_months()
     if not months:
         st.sidebar.warning("No data loaded yet.")
         return None, None, None
@@ -146,21 +151,11 @@ def period_selector(key="period_preset", label="Analysis Period", default_preset
     _today = _date.today()
     options = [f"{format_month(y, m)}" for y, m in months]
 
-    ref_kwargs = {"key": ref_key, "help": "The latest month to include in the analysis. Defaults to the last fully completed month (current partial month is excluded)."}
+    ref_kwargs = {"key": ref_key, "help": "The latest month to include in the analysis. Defaults to the last month with fully scraped data."}
     if ref_key not in st.session_state:
-        # Skip current month AND previous month (data reporting lag means
-        # the most recent month is typically incomplete for 7-15 days)
-        _prev_month = _today.month - 1 if _today.month > 1 else 12
-        _prev_year = _today.year if _today.month > 1 else _today.year - 1
-        default_ref_idx = 0
-        for i, (y, m) in enumerate(months):
-            if (y == _today.year and m == _today.month):
-                continue  # Skip current month
-            if (y == _prev_year and m == _prev_month):
-                continue  # Skip previous month (likely incomplete)
-            default_ref_idx = i
-            break
-        ref_kwargs["index"] = default_ref_idx
+        # Default to the latest available month (the month list is already
+        # sourced from actual scraped data, so the latest IS complete)
+        ref_kwargs["index"] = 0
 
     selected = st.sidebar.selectbox("Reference Month", options, **ref_kwargs)
     idx = options.index(selected)
@@ -206,21 +201,10 @@ def primary_period_selector(key="ps_period", label="Analysis Period", default_pr
     preset = st.sidebar.selectbox(label, preset_options, **preset_kwargs)
 
     options = [f"{format_month(y, m)}" for y, m in months]
-    ref_kwargs = {"key": ref_key, "help": "The latest month to include in the analysis. Defaults to the last fully completed month (current partial month is excluded)."}
+    ref_kwargs = {"key": ref_key, "help": "The latest month to include in the analysis. Defaults to the last month with data in the database."}
     if ref_key not in st.session_state:
-        from datetime import date as _date
-        _today = _date.today()
-        _prev_month = _today.month - 1 if _today.month > 1 else 12
-        _prev_year = _today.year if _today.month > 1 else _today.year - 1
-        default_idx = 0
-        for i, (y, m) in enumerate(months):
-            if (y == _today.year and m == _today.month):
-                continue
-            if (y == _prev_year and m == _prev_month):
-                continue
-            default_idx = i
-            break
-        ref_kwargs["index"] = default_idx
+        # Default to latest available (the month list comes from actual data)
+        ref_kwargs["index"] = 0
 
     selected = st.sidebar.selectbox("Reference Month", options, **ref_kwargs)
     idx = options.index(selected)

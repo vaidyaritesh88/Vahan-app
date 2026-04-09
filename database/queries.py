@@ -1867,3 +1867,21 @@ def get_primary_available_months():
     conn.close()
     return [(r['year'], r['month']) for r in rows]
 
+def get_vehcat_available_months():
+    """Get all (year, month) pairs with scraped vehcat data, descending.
+
+    This should be used by retail pages instead of get_available_months()
+    which queries national_monthly (Excel) and may show months with no
+    scraped data.
+
+    Returns list of (year, month) tuples.
+    """
+    conn = get_connection()
+    rows = conn.execute("""
+        SELECT DISTINCT year, month FROM national_oem_vehcat
+        WHERE month BETWEEN 1 AND 12
+        ORDER BY year DESC, month DESC
+    """).fetchall()
+    conn.close()
+    return [(r['year'], r['month']) for r in rows]
+
