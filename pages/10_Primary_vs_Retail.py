@@ -321,7 +321,8 @@ if base_month_lbl is None:
 
 st.markdown(
     f"Both series rebased to **100** at **{base_month_lbl}**. "
-    "Divergence indicates cumulative inventory buildup or destocking."
+    "If the Primary index rises faster than Retail, OEMs are dispatching at a faster pace "
+    "than end-customer registrations \u2014 the dealer pipeline is getting fatter."
 )
 
 # Build full (unfiltered) merged for index — need from base month onward
