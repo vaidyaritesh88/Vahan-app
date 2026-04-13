@@ -19,7 +19,7 @@ init_db()
 
 st.title("Data Management")
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["Excel Import", "State Data Scraper", "Primary Sales Import", "Data Status", "Local Setup Guide"])
+tab1, tab2, tab2b, tab3, tab4, tab5 = st.tabs(["Excel Import", "State Data Scraper", "National Data Scraper", "Primary Sales Import", "Data Status", "Local Setup Guide"])
 
 # ── Tab 1: Excel Import ──
 with tab1:
@@ -338,6 +338,190 @@ with tab2:
             st.dataframe(scrape_log, use_container_width=True, hide_index=True)
     else:
         st.info("No scrape history yet. Configure and start the scraper above.")
+
+
+# ── Tab 2b: National Data Scraper ──
+with tab2b:
+    st.subheader("National OEM Data Scraper")
+    st.markdown("""
+    Scrape **national-level OEM data by vehicle category** from the Vahan portal.
+    This populates the data used by **Category Overview**, **Category Drilldown**,
+    and **Subsegment Mix** pages.
+
+    This is different from the State Scraper (which gives per-state totals but
+    no category breakdown). Both scrapers need to run for full dashboard coverage.
+
+    | Scraper | What it provides | Pages that use it |
+    |---------|-----------------|-------------------|
+    | **State Scraper** (tab above) | OEM volumes per state | OEM 360 state section, State Performance |
+    | **National Scraper** (this tab) | OEM volumes per vehicle category | Category Overview, Drilldown, Subsegment Mix |
+    """)
+
+    from datetime import datetime as _dt_cls
+
+    # Show current data status
+    import sqlite3 as _sql3
+    _conn_check = _sql3.connect(os.path.join(DATA_DIR, "vahan_tracker.db"))
+    _conn_check.row_factory = _sql3.Row
+    _recent_national = _conn_check.execute("""
+        SELECT year, month, SUM(volume) as vol, COUNT(DISTINCT oem_name) as oems
+        FROM national_oem_vehcat
+        WHERE month BETWEEN 1 AND 12
+        GROUP BY year, month ORDER BY year DESC, month DESC LIMIT 6
+    """).fetchall()
+    _conn_check.close()
+
+    if _recent_national:
+        st.markdown("**Current national vehcat data:**")
+        _nat_cols = st.columns(len(_recent_national))
+        for i, r in enumerate(_recent_national):
+            with _nat_cols[i]:
+                from components.formatters import format_month as _fm
+                st.metric(_fm(r["year"], r["month"]), format_units(r["vol"]))
+    else:
+        st.info("No national vehcat data yet. Run the scraper below.")
+
+    st.divider()
+
+    # Scrape configuration
+    st.markdown("### Configure Scrape")
+
+    _nat_col1, _nat_col2, _nat_col3 = st.columns(3)
+    with _nat_col1:
+        _current_year = _dt_cls.now().year
+        _current_month = _dt_cls.now().month
+        # Default FY: current FY
+        _default_fy = _current_year if _current_month >= 4 else _current_year - 1
+        _fy_options = list(range(2019, _default_fy + 1))
+        _selected_fys = st.multiselect(
+            "FY to scrape",
+            _fy_options,
+            default=[_default_fy],
+            key="nat_fy",
+            help="FY start year. E.g., 2025 = FY26 (Apr 2025 - Mar 2026)",
+        )
+
+    with _nat_col2:
+        _type_options = ["vehcat", "fuel", "vehclass"]
+        _selected_types = st.multiselect(
+            "Scrape types",
+            _type_options,
+            default=["vehcat", "fuel"],
+            key="nat_types",
+            help="vehcat = OEM x Vehicle Category (for PV/2W/3W/CV breakdown). fuel = OEM x Fuel Type.",
+        )
+
+    with _nat_col3:
+        _month_options = {
+            "All months (full FY)": None,
+            "Apr": [4], "May": [5], "Jun": [6], "Jul": [7],
+            "Aug": [8], "Sep": [9], "Oct": [10], "Nov": [11],
+            "Dec": [12], "Jan": [1], "Feb": [2], "Mar": [3],
+        }
+        _selected_month_label = st.selectbox(
+            "Month(s)",
+            list(_month_options.keys()),
+            key="nat_months",
+            help="Scrape specific month(s) or all 12 months. Specific months are faster.",
+        )
+        _selected_months = _month_options[_selected_month_label]
+
+    # Estimate
+    _n_fys = len(_selected_fys)
+    _n_types = len(_selected_types)
+    _n_months = len(_selected_months) if _selected_months else 12
+    _total_scrapes = _n_fys * _n_types * _n_months
+    _est_time = _total_scrapes * 5 / 60  # ~5 seconds per scrape
+
+    st.caption(f"**{_total_scrapes} scrapes** (~{_est_time:.0f} min at ~5s each)")
+
+    # Start button
+    if st.button("Start National Scrape", type="primary", key="btn_nat_scrape",
+                  disabled=(_n_fys == 0 or _n_types == 0)):
+        import subprocess
+
+        cmd = [
+            sys.executable, "-m", "scraper.run_national",
+            "--fy", *[str(fy) for fy in _selected_fys],
+            "--types", *_selected_types,
+        ]
+        if _selected_months:
+            cmd.extend(["--months", *[str(m) for m in _selected_months]])
+
+        try:
+            import platform
+            _cwd = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            if platform.system() == "Windows":
+                CREATE_NEW_PROCESS_GROUP = 0x00000200
+                DETACHED_PROCESS = 0x00000008
+                subprocess.Popen(
+                    cmd,
+                    creationflags=CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    cwd=_cwd,
+                )
+            else:
+                subprocess.Popen(
+                    cmd,
+                    start_new_session=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    cwd=_cwd,
+                )
+            st.success(
+                f"National scraper launched! Scraping {_n_fys} FY(s) x {_n_types} type(s) x {_n_months} month(s). "
+                "This runs in the background. Refresh this page in a few minutes to see updated data."
+            )
+        except Exception as e:
+            st.error(f"Failed to start national scraper: {str(e)}")
+
+    st.divider()
+
+    # Quick actions
+    st.markdown("### Quick Actions")
+    _qa_col1, _qa_col2 = st.columns(2)
+    with _qa_col1:
+        if st.button("Scrape Latest Month Only", key="btn_nat_latest",
+                      help="Scrape only the most recent month for vehcat + fuel"):
+            import subprocess
+            # Determine latest month that needs scraping
+            if _recent_national:
+                _last_y, _last_m = _recent_national[0]["year"], _recent_national[0]["month"]
+                # Next month
+                _next_m = _last_m + 1 if _last_m < 12 else 1
+                _next_y = _last_y if _last_m < 12 else _last_y + 1
+            else:
+                _next_y, _next_m = _current_year, _current_month
+
+            _next_fy = _next_y if _next_m >= 4 else _next_y - 1
+
+            cmd = [
+                sys.executable, "-m", "scraper.run_national",
+                "--fy", str(_next_fy),
+                "--types", "vehcat", "fuel",
+                "--months", str(_next_m),
+            ]
+
+            try:
+                _cwd = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                import platform
+                if platform.system() == "Windows":
+                    subprocess.Popen(cmd, creationflags=0x200 | 0x08,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=_cwd)
+                else:
+                    subprocess.Popen(cmd, start_new_session=True,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=_cwd)
+                from components.formatters import format_month as _fm2
+                st.success(f"Scraping {_fm2(_next_y, _next_m)} (vehcat + fuel). Refresh in ~2 minutes.")
+            except Exception as e:
+                st.error(f"Failed: {str(e)}")
+
+    with _qa_col2:
+        st.caption(
+            "**Scrape Latest Month** auto-detects the next month after your latest data "
+            "and scrapes vehcat + fuel for just that month. Fast (~2 minutes)."
+        )
 
 
 # ── Tab 3: Primary Sales Import ──
